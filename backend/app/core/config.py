@@ -33,6 +33,14 @@ class Settings(BaseSettings):
     # 允许用 LOAD DATA LOCAL INFILE 从本地文件批量灌数据，导那 861 万行就靠它
     mysql_local_infile: bool = True
 
+    # 签 JWT 用的密钥。注意这里的默认值是明文写死的，**仅供本地开发**，
+    # 上线前必须换成环境变量注入的真密钥 —— 泄露了别人就能伪造任意用户的 token
+    jwt_secret_key: str = "cityflow-development-secret"
+    jwt_algorithm: str = "HS256"  # 对称加密：同一个密钥既签又验，单服务够用
+    # token 多久过期（分钟）。设 30 是因为它是访问凭证，短一点更安全；
+    # 真要长时间不登录还得靠 refresh token，那是另一个东西，目前没做
+    access_token_expire_minutes: int = 30
+
     model_config = SettingsConfigDict(
         env_file=BACKEND_ROOT / ".env",
         env_file_encoding="utf-8",

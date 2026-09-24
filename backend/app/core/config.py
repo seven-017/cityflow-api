@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     database_url: str = (
         "mysql+pymysql://cityflow:cityflow@127.0.0.1:3306/cityflow?charset=utf8mb4"
     )
+    # 要不要把每条 SQL 原样打到日志里，只有查慢查询的时候才开
+    sql_echo: bool = False
+    # 允许用 LOAD DATA LOCAL INFILE 从本地文件批量灌数据，导那 861 万行就靠它
+    mysql_local_infile: bool = True
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_ROOT / ".env",

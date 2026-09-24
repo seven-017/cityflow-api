@@ -7,6 +7,9 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2] #把文件路径转换为绝�
 
 
 class Settings(BaseSettings):
+    # 控制日志啰不啰嗦：true 打 DEBUG，false 只到 INFO
+    app_debug: bool = False
+
     database_url: str = (
         "mysql+pymysql://cityflow:cityflow@127.0.0.1:3306/cityflow?charset=utf8mb4"
     )

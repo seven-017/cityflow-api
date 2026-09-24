@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
+from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 
 
@@ -38,6 +39,9 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # 异常处理器要在挂路由之前注册好，顺序反了的话前面已经挂上去的路由
+    # 用的还是默认处理方式
+    register_exception_handlers(application)
     application.include_router(api_router, prefix=settings.api_v1_prefix)
 
     return application

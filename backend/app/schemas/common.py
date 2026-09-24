@@ -14,3 +14,21 @@ class ApiResponse[T](BaseModel):
     code: int = 0
     message: str = "success"
     data: T
+
+
+class PageMeta(BaseModel):
+    """分页的"说明书"：这是第几页、一页多少条、总共多少条、总共多少页。
+
+    为什么要 pages 而不让前端自己算：总条数会变，前端算出来的和数据库当下的
+    可能不一样，由后端一次算好最省事。
+    """
+
+    page: int
+    page_size: int
+    total: int
+    pages: int
+
+
+class PageResponse[T](BaseModel):
+    items: list[T]
+    meta: PageMeta

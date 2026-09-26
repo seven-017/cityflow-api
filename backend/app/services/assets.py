@@ -1,11 +1,9 @@
-import math
-
 from sqlalchemy.orm import Session
 
 from app.models import Asset
 from app.repositories.assets import AssetRepository
 from app.schemas.assets import AssetSummary
-from app.schemas.common import PageMeta
+from app.schemas.common import CursorMeta
 
 
 def asset_summary(asset: Asset) -> AssetSummary:
@@ -32,16 +30,23 @@ class AssetService:
         self.db = db
         self.assets = AssetRepository(db)
 
-    def list_assets(self, page: int, page_size: int) -> tuple[list[AssetSummary], PageMeta]:
-        # 先数总数，再取这一页——两条 SQL 打底。跟第 14 步的 list_users 一个套路，
-        # 少了总数前端画不出页码，"第 3 页"这种按钮就没法点。
+    def list_assets(self, *, after_id: int | None, limit: int) -> tuple[list[AssetSummary], CursorMeta]:
+        # 总数还是要给的——前端得显示"共 148423 条"。
+        # 实测这一下 assets 是 17 ms，跟原来深分页那 2 秒比起来不算主要矛盾，先留着。
+        # （work_orders 那张表是 258 ms，到第 17 步得重新考虑这块，见仓库层那句注释。）
         total = self.assets.count_assets()
-        # "第几页"是业务概念，仓库层不认这个，所以在这儿换算成"跳过多少行"再传下去
-        offset = (page - 1) * page_size
-        items = [asset_summary(a) for a in self.assets.list_assets(offset, page_size)]
-        # math.ceil 就是向上取整：148423 条、每页 20 算出来是 7421.15，得给 7422 页
-        #
-        # 后面那个 if page_size else 0 其实是多余的——FastAPI 那边 ge=1 已经把 0 拦了。
-        # 留着只是防以后有人绕过接口直接调 service，不算错，但确实是废话，先记着。
-        pages = math.ceil(total / page_size) if page_size else 0
-        return items, PageMeta(page=page, page_size=page_size, total=total, pages=pages)
+        # 仓库层故意多要了一行，这里看它到底有没有多给
+        rows = self.assets.list_assets(after_id=after_id, limit=limit)
+        has_more = len(rows) > limit
+        # 多出来那一条只是用来探测"还有没有下一页"的，不能发给前端
+        page_rows = rows[:limit]
+        # 下一页从哪开始？就是这一页最后那条的 id。
+        # has_more 为假的时候给 None，让前端一眼看出到底了
+        next_cursor = page_rows[-1].id if has_more and page_rows else None
+        items = [asset_summary(a) for a in page_rows]
+        return items, CursorMeta(
+            limit=limit,
+            total=total,
+            next_cursor=next_cursor,
+            has_more=has_more,
+        )

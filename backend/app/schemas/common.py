@@ -32,3 +32,22 @@ class PageMeta(BaseModel):
 class PageResponse[T](BaseModel):
     items: list[T]
     meta: PageMeta
+
+
+class CursorMeta(BaseModel):
+    """游标分页的说明书。
+
+    跟 PageMeta 比，少了 page / pages —— 游标分页本来就跳不了页，
+    还报个"第几页"是骗人的。多了两个：next_cursor（下一页从哪开始）、has_more（还有没有）。
+    """
+
+    limit: int
+    total: int
+    # 下一页的起点：把这个数当下一次请求的 after_id 传回来就行。到底了就是 None
+    next_cursor: int | None
+    has_more: bool
+
+
+class CursorResponse[T](BaseModel):
+    items: list[T]
+    meta: CursorMeta

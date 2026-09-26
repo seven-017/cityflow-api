@@ -17,17 +17,39 @@ class AssetRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def list_assets(self, offset: int, limit: int) -> list[Asset]:
-        # 分页说白了就俩数：跳过多少行（offset）、取多少行（limit）。
-        # 落到 SQL 就是 LIMIT limit OFFSET offset，没什么玄机。
-        #
-        # order_by 千万别省。SQL 本身不保证顺序，说白了就是"我按什么顺序给你都行"。
-        # 不写的话翻第 2 页可能又刷出第 1 页的东西，也有可能有些行你永远翻不到。
-        # 按主键排最省事——既是稳定顺序，又走主键索引，不额外花钱。
-        statement = select(Asset).order_by(Asset.id).offset(offset).limit(limit)
+    def list_assets(self, *, after_id: int | None, limit: int) -> list[Asset]:
+        """按 id 往后翻，一次取 limit 条（其实会多要一条，见下面）。
+
+        这里原来是 LIMIT ? OFFSET ? 那种写法，2026-09-26 换成了游标。
+        换的原因是量出来一个很难看的东西：
+
+            LIMIT 20 OFFSET 2200000   ->  3349 ms   EXPLAIN: type=index, rows=2158704
+            WHERE id > 2768635 LIMIT 20 ->  0.9 ms   EXPLAIN: type=range, rows=37932
+
+        同一个位置、同样 20 条数据，差了 3700 倍。
+        根因是 OFFSET 的实现方式：它不是"跳过去"，是"从索引头开始一行行走，
+        走过 offset 行全部丢掉，再取 limit 行"。所以 OFFSET 越大越慢，
+        而且是线性的——EXPLAIN 里那个 rows 从 20 一路涨到 215 万就是证据。
+        WHERE id > ? 就不一样了，主键索引是有序的，直接定位到那个位置往下取。
+
+        代价是跳不了页了：你不知道第 5000 页的第一条 id 是多少，只能一页页往后走。
+        前端那边得从"页码按钮"改成"上一页 / 下一页"或者"加载更多"。
+        这个取舍是有意的——一个 222 万行的表，硬跳第 5000 页本来也没什么意义。
+        """
+        statement = select(Asset)
+        if after_id is not None:
+            # 不传 after_id 就是第一页，不加这个条件
+            statement = statement.where(Asset.id > after_id)
+        # 多要一条（limit + 1）：拿回来是 limit + 1 条就说明"后面还有"，
+        # 只有 limit 条就说明到底了。这样省掉了额外一次查询。
+        # 多出来的那一条由 service 裁掉，不会发到前端。
+        statement = statement.order_by(Asset.id).limit(limit + 1)
         return list(self.db.execute(statement).scalars().all())
 
     def count_assets(self) -> int:
         # 数总数交给数据库（SQL 的 COUNT），别把 148423 行捞回 Python 里 len()。
         # 捞回来的话光是传输 + 建 148423 个对象的开销就够呛，而我们要的只是一个数字。
+        #
+        # 补充一句实测：assets 这一下是 17 ms，还撑得住；
+        # work_orders（222 万行）要 258 ms，到第 17 步得重新想想这块要不要每次都算。
         return int(self.db.execute(select(func.count(Asset.id))).scalar_one())

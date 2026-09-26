@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -31,3 +32,43 @@ class AssetSummary(BaseModel):
     description: str
     status: str | None
     commissioned_on: date | None
+
+
+class AssetDetail(BaseModel):
+    """资产详情页里那条资产长什么样。
+
+    跟 AssetSummary 是同一个模型的两个视图：列表页一行放不下这么多列，详情页可以。
+    但这里也还是"挑"，不是全给 —— 模型里 27 列，这儿 17 列。
+
+    没进来的那几列是 GIS 那组（gis_object_id / gis_layer / x_location / y_location）。
+    不是不能给，是现在没人用。等真要做地图了再加，没必要提前占坑。
+    这也顺便说明了"列表页砍掉的字段在详情页可能有用"——比如 withdrawn_on、
+    manufacturer、serial_number，在列表页是噪音，在详情页就是该看的东西。
+
+    已知的坑（先留着不修，明确记录在案）：
+    record_value 这个字段返回给前端时是"字符串"，不是数字。
+    实测 Pydantic 2.13 把 Decimal("1234567.89") 序列化成 "1234567.89"（带引号）。
+    为什么不干脆声明成 float？因为这是金额，float 会掉精度，数据库里存的本来就是
+    Numeric(18,2)。所以"字符串"是有意的代价，前端自己转一下就好。
+    真要修是给这个字段挂个 serializer 转成 float —— 但那等于放弃精度，是个新决定，
+    这一版先不动。
+    """
+
+    id: int
+    source_record_id: str
+    data_source: str
+    asset_type: str | None
+    description: str
+    asset_class: str | None
+    category: str | None
+    location: str | None
+    manufacturer: str | None
+    model: str | None
+    serial_number: str | None
+    mrc_code: str | None
+    status: str | None
+    commissioned_on: date | None
+    withdrawn_on: date | None
+    # 见类注释最后一段：这里出来的是字符串，是有意的，不是 bug
+    record_value: Decimal | None
+    source_updated_at: datetime | None

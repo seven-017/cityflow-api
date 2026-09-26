@@ -46,6 +46,14 @@ class AssetRepository:
         statement = statement.order_by(Asset.id).limit(limit + 1)
         return list(self.db.execute(statement).scalars().all())
 
+    def get_by_id(self, asset_id: int) -> Asset | None:
+        # 按主键查单条。走主键索引，行数不用管——主键最多命中一行。
+        #
+        # 用 scalar_one_or_none 而不是 first()：万一主键上真的命中两行（说明数据出问题了），
+        # 前者会直接报错，后者会闷头给你第一条。这种地方宁可直接炸，也别悄悄给错数据。
+        statement = select(Asset).where(Asset.id == asset_id)
+        return self.db.execute(statement).scalar_one_or_none()
+
     def count_assets(self) -> int:
         # 数总数交给数据库（SQL 的 COUNT），别把 148423 行捞回 Python 里 len()。
         # 捞回来的话光是传输 + 建 148423 个对象的开销就够呛，而我们要的只是一个数字。

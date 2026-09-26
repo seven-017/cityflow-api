@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, require_permissions
 from app.core.permissions import PermissionCode
 from app.models import User
-from app.schemas.assets import AssetSummary
+from app.schemas.assets import AssetDetail, AssetSummary
 from app.schemas.common import ApiResponse, CursorResponse
 from app.services.assets import AssetService
 
@@ -28,3 +28,15 @@ def list_assets(
 ) -> ApiResponse[CursorResponse[AssetSummary]]:
     items, meta = AssetService(db).list_assets(after_id=after_id, limit=limit)
     return ApiResponse(data=CursorResponse(items=items, meta=meta))
+
+
+@router.get("/{asset_id}", response_model=ApiResponse[AssetDetail])
+def get_asset(
+    asset_id: int,
+    db: Annotated[Session, Depends(get_db)],
+    # 详情页跟列表页要的是同一个权限，所以这儿还是 ASSET_READ，没新开一个
+    _: Annotated[User, Depends(require_permissions(PermissionCode.ASSET_READ))],
+) -> ApiResponse[AssetDetail]:
+    # asset_id 走的是路径参数，FastAPI 自己会转成 int。
+    # 传个 abc 进来会由它直接甩 422，不用我们写转换和 try
+    return ApiResponse(data=AssetService(db).get_asset(asset_id))

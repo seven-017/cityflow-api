@@ -63,10 +63,9 @@ class AssetService:
         self.assets = AssetRepository(db)
 
     def list_assets(self, *, after_id: int | None, limit: int) -> tuple[list[AssetSummary], CursorMeta]:
-        # 总数还是要给的——前端得显示"共 148423 条"。
-        # 实测这一下 assets 是 17 ms，跟原来深分页那 2 秒比起来不算主要矛盾，先留着。
-        # （work_orders 那张表是 258 ms，到第 17 步得重新考虑这块，见仓库层那句注释。）
-        total = self.assets.count_assets()
+        # 这里原来第一句是 total = self.assets.count_assets()，2026-09-29 删了。
+        # 分页元数据不再报总数，理由写在 schemas/common.py 的 CursorMeta 上。
+        # 删掉之后这个请求少了一次全表 COUNT，assets 上省 16~23 ms。
         # 仓库层故意多要了一行，这里看它到底有没有多给
         rows = self.assets.list_assets(after_id=after_id, limit=limit)
         has_more = len(rows) > limit
@@ -78,7 +77,6 @@ class AssetService:
         items = [asset_summary(a) for a in page_rows]
         return items, CursorMeta(
             limit=limit,
-            total=total,
             next_cursor=next_cursor,
             has_more=has_more,
         )

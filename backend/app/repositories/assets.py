@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Asset
@@ -54,10 +54,7 @@ class AssetRepository:
         statement = select(Asset).where(Asset.id == asset_id)
         return self.db.execute(statement).scalar_one_or_none()
 
-    def count_assets(self) -> int:
-        # 数总数交给数据库（SQL 的 COUNT），别把 148423 行捞回 Python 里 len()。
-        # 捞回来的话光是传输 + 建 148423 个对象的开销就够呛，而我们要的只是一个数字。
-        #
-        # 补充一句实测：assets 这一下是 17 ms，还撑得住；
-        # work_orders（222 万行）要 258 ms，到第 17 步得重新想想这块要不要每次都算。
-        return int(self.db.execute(select(func.count(Asset.id))).scalar_one())
+    # 这里原来还有个 count_assets()，2026-09-29 删了。
+    # 因为分页元数据里的 total 一起删了（原因写在 schemas/common.py 的 CursorMeta 上），
+    # 没人调它了 —— 没调用者的方法就是死代码。
+    # 留个空行在这儿，省得以后有人翻 git blame 时一头雾水。

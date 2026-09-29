@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import WorkOrder
@@ -41,26 +41,16 @@ class WorkOrderRepository:
         statement = select(WorkOrder).where(WorkOrder.id == work_order_id)
         return self.db.execute(statement).scalar_one_or_none()
 
-    def count_work_orders(self) -> int:
-        """数总数。
-
-        这一下是全项目最贵的单条查询。实测（2026-09-29）：
-
-            assets      148423 行  ->   16~23 ms
-            work_orders 2220853 行 ->  322~358 ms（同一批里复测过，抖动 ±11%）
-
-        EXPLAIN 显示它 type=index，走的是 ix_work_orders_request_date
-        而不是主键 —— 因为 MySQL 会挑一条"足够便宜"的二级索引来数，
-        数索引比数整张表便宜（不用回表）。那条索引存的是 date(3 字节)+主键，
-        比主键的聚簇索引（整行都塞在里面）窄得多。
-
-        代价大不大？跟列表查询本身比一下就知道：
-            列表查询（游标翻页，21 行）  1.2~1.6 ms
-            COUNT(*)                    322~358 ms
-        差了两百多倍。也就是说分页接口本来很轻，是 total 把它拉重的。
-
-        四个候选（不报 total / 只第一页算 / 上缓存 / 用 information_schema
-        的估算值）的代价都量过，还没定用哪个。
-        这一版先跟 assets 保持一致：每次都算。等定了再单独改一次。
-        """
-        return int(self.db.execute(select(func.count(WorkOrder.id))).scalar_one())
+    # 这里原来有个 count_work_orders()，是全项目最贵的单条查询，2026-09-29 删了。
+    # 它当时量出来的数（keep 在这儿，因为这是"为什么删它"的证据）：
+    #
+    #     assets      148423 行  ->   16~23 ms
+    #     work_orders 2220853 行 ->  322~358 ms
+    #     同一条列表查询（游标取 21 行） ->  1.2~1.6 ms
+    #
+    # 也就是说这一个是列表查询的两百多倍，占了整个请求 437 ms 里的 330 ms（75%）。
+    # 删掉它之后列表请求回到个位数毫秒。理由写在 schemas/common.py 的 CursorMeta 上。
+    #
+    # 记一笔当时排除的路子：本来说"上 Redis 缓存一下"，
+    # 但缓存该给"确实需要、而且算起来贵"的东西用。这个数字不需要（游标分页跳不了页），
+    # 也不值得为它引一整个 Redis 组件。真要看总量就该放 Dashboard 里缓存一次给整页复用。

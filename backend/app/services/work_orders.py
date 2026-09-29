@@ -70,10 +70,9 @@ class WorkOrderService:
     def list_work_orders(
         self, *, after_id: int | None, limit: int
     ) -> tuple[list[WorkOrderSummary], CursorMeta]:
-        # 总数这次还是算的（跟 assets 保持一致）。
-        # 实测量过：这一下 322~358 ms，是列表查询本身的 200 多倍。
-        # 要不要改、改成哪种，四个方案的代价都量齐了，等拍了板单独做一次改动。
-        total = self.work_orders.count_work_orders()
+        # 这里原来第一句是 total = self.work_orders.count_work_orders()，2026-09-29 删了。
+        # 那一下是 322~358 ms，占整个请求的 75% —— 接口慢就慢在这一句上。
+        # 为什么干脆不报总数，理由写在 schemas/common.py 的 CursorMeta 上。
         rows = self.work_orders.list_work_orders(after_id=after_id, limit=limit)
         has_more = len(rows) > limit
         # 多要的那条只是探路的，不能发出去
@@ -82,7 +81,6 @@ class WorkOrderService:
         items = [work_order_summary(w) for w in page_rows]
         return items, CursorMeta(
             limit=limit,
-            total=total,
             next_cursor=next_cursor,
             has_more=has_more,
         )

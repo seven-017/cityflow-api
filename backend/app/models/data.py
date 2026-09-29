@@ -168,14 +168,36 @@ class WorkOrder(TimestampMixin, Base):
     )
 
     # 下面两个 relationship 都指向 users，必须用 foreign_keys 明确说是哪一列，
-    # 不然 SQLAlchemy 不知道 created_by_id 和 assigned_to_id 各对应哪个
+    # 不然 SQLAlchemy 不知道 created_by_id 和 assigned_to_id 各对应哪个。
+    #
+    # 这两个原来写的是 lazy="joined"（一查工单就自动 JOIN 出对应用户），
+    # 2026-09-29 做第 17 步列表接口时去掉了。原因是量出来一个 16 秒的查询：
+    #
+    #   select(WorkOrder) WHERE id > 1678636 ORDER BY id LIMIT 21
+    #     原样跑               -> 16614 ms
+    #     EXPLAIN: work_orders  type=range  key=PRIMARY  rows=1079352
+    #              Extra=Using temporary; Using filesort
+    #              users_1     type=ALL    rows=7  Using join buffer (hash join)
+    #     把 JOIN 去掉                    -> 2.5 ms
+    #     带 JOIN + FORCE INDEX (PRIMARY)  -> 3.7 ms
+    #     同样走 ORM、改成按需加载          -> 4.6 ms
+    #
+    # 说白了就是：这条 LEFT JOIN 让 MySQL 挑了 hash join，于是它没法再用主键顺序
+    # 直接往下拿 21 行，只能把 107 万行先查出来排一遍（filesort）再 limit。
+    # LIMIT 21 本来能省的那一大堆活，全白省了。
+    #
+    # 而且这 JOIN 在这张表上永远是白搭：created_by_id 和 assigned_to_id
+    # 实测 222 万行 100% 是 NULL —— 那是平台自己录工单时才会填的字段，
+    # 现在库里全是官方导进来的老数据。
+    #
+    # 去掉之后就是默认的按需加载：真要读 wo.assigned_to 的那一刻才多查一条。
+    # 第 18 步做分派会用到它，到时候按需查一次就够了，
+    # 不该让每个列表查询都替它买单。
     created_by: Mapped["User | None"] = relationship(
         foreign_keys=[created_by_id],
-        lazy="joined",
     )
     assigned_to: Mapped["User | None"] = relationship(
         foreign_keys=[assigned_to_id],
-        lazy="joined",
     )
     status_history: Mapped[list["WorkOrderStatusHistory"]] = relationship(
         back_populates="work_order",

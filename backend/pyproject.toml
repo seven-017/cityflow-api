@@ -14,3 +14,20 @@ dependencies = [
     "sqlalchemy>=2.0.43,<3.0",
     "uvicorn[standard]>=0.53.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+# 这个 pythonpath 是必须的，少了它 `import app` 会直接 ModuleNotFoundError。
+# 原因是 pytest 默认会把「测试文件所在的目录」（也就是 tests/）插到 sys.path 最前面，
+# 而我们的 app 包挂在 backend/ 下面，从 tests/ 那个位置根本看不到它。
+# 写上 "." 就等于把 backend/ 也塞进 sys.path —— 注意它是相对 rootdir 的，
+# rootdir 认的是有这个配置文件的那一层，也就是 backend/。
+# 顺便说一句，这个选项 pytest 7.0 开始是内置的，不用再装 pytest-pythonpath 那个老插件。
+pythonpath = ["."]
+# 只说去哪儿找测试。不写这个的话 pytest 会从根往下翻，
+# .venv 里那堆第三方包自带的 test_*.py 也会被它摸一遍。
+testpaths = ["tests"]

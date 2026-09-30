@@ -122,3 +122,19 @@ class WorkOrderAssignRequest(BaseModel):
     """
 
     assignee_id: int = Field(gt=0)
+
+
+class WorkOrderRejectRequest(BaseModel):
+    """驳回要带的东西：就一个原因。
+
+    开始 / 完成 / 关闭这三个动作都不要请求体 —— 谁做的、什么时候做的服务端自己知道，
+    前端传过来反而是白给它一个说谎的机会。
+
+    只有驳回不行。驳回是一条"这活我不干了"的记录，三个月后翻流水，
+    光看见一个 REJECTED 是不知道该找谁问为什么的。所以这儿必填。
+
+    500 这个上限是照模型上 reason 那一列的长度写的（String(500)），
+    在这儿挡住，前端当场拿到明确的 422，不用等写库才炸。
+    """
+
+    reason: str = Field(min_length=1, max_length=500)

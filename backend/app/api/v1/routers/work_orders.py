@@ -11,6 +11,7 @@ from app.schemas.work_orders import (
     WorkOrderAssignRequest,
     WorkOrderCreateRequest,
     WorkOrderDetail,
+    WorkOrderRejectRequest,
     WorkOrderSummary,
 )
 from app.services.work_orders import WorkOrderService
@@ -94,6 +95,113 @@ def assign_work_order(
     updated = WorkOrderService(db).assign_work_order(
         work_order_id=work_order_id,
         assignee_id=payload.assignee_id,
+        operator=operator,
+        request_path=request.url.path,
+        ip_address=ip_address,
+    )
+    return ApiResponse(data=updated)
+
+
+# ---------------------------------------------------------------------------
+# 状态流转的四个动作。权限点全都是 work_order:update —— 也就是说
+# ADMIN / DISPATCHER / ENGINEER 都能调，VIEWER 没有 update 会被 403 挡掉。
+#
+# 这里有个文档上的矛盾，记一笔，免得以后有人看见觉得写错了：
+# business-rules.md 的权限表里 ENGINEER 只有 work_order:update，
+# 但同一篇的正文又写着"工程师可以驳回做不了的工单"。两处对不上。
+# 取了口径宽的那一侧（驳回也能做），理由是：
+#   1. 正文那句话本身就是需求，表格大概是漏了；
+#   2. 我们的权限点是灌库的种子数据，项目里没有 seed.py，
+#      为一个动作单开权限点要同时动 permissions 表、role_permissions 表
+#      和 PermissionCode 三处，代价和收益不成比例。
+# 真要收紧的话，加一个 work_order:reject 权限点、只给 ADMIN / DISPATCHER，
+# 然后把这四个路由的依赖按动作拆开就行 —— 改起来是一处的事。
+#
+# 另外一个偷懒的地方：这四个函数体长得几乎一模一样，只有调用的 service 方法不同。
+# 没抽工厂函数，因为 FastAPI 认的是函数签名（那些 Annotated[..., Depends(...)]），
+# 用闭包生成出来的签名它读不干净（类型标注会变成一堆参数化泛型），
+# 值得换来的那点行数不值当。四个就四个吧。
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{work_order_id}/start", response_model=ApiResponse[WorkOrderDetail])
+def start_work_order(
+    work_order_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    operator: Annotated[
+        User,
+        Depends(require_permissions(PermissionCode.WORK_ORDER_UPDATE)),
+    ],
+) -> ApiResponse[WorkOrderDetail]:
+    # 没有请求体。开始就是开始，没有额外信息可传 ——
+    # 谁点的、什么时候点的，服务端自己知道
+    ip_address = request.client.host if request.client else None
+    updated = WorkOrderService(db).start_work_order(
+        work_order_id=work_order_id,
+        operator=operator,
+        request_path=request.url.path,
+        ip_address=ip_address,
+    )
+    return ApiResponse(data=updated)
+
+
+@router.post("/{work_order_id}/complete", response_model=ApiResponse[WorkOrderDetail])
+def complete_work_order(
+    work_order_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    operator: Annotated[
+        User,
+        Depends(require_permissions(PermissionCode.WORK_ORDER_UPDATE)),
+    ],
+) -> ApiResponse[WorkOrderDetail]:
+    ip_address = request.client.host if request.client else None
+    updated = WorkOrderService(db).complete_work_order(
+        work_order_id=work_order_id,
+        operator=operator,
+        request_path=request.url.path,
+        ip_address=ip_address,
+    )
+    return ApiResponse(data=updated)
+
+
+@router.post("/{work_order_id}/close", response_model=ApiResponse[WorkOrderDetail])
+def close_work_order(
+    work_order_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    operator: Annotated[
+        User,
+        Depends(require_permissions(PermissionCode.WORK_ORDER_UPDATE)),
+    ],
+) -> ApiResponse[WorkOrderDetail]:
+    ip_address = request.client.host if request.client else None
+    updated = WorkOrderService(db).close_work_order(
+        work_order_id=work_order_id,
+        operator=operator,
+        request_path=request.url.path,
+        ip_address=ip_address,
+    )
+    return ApiResponse(data=updated)
+
+
+@router.post("/{work_order_id}/reject", response_model=ApiResponse[WorkOrderDetail])
+def reject_work_order(
+    work_order_id: int,
+    payload: WorkOrderRejectRequest,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    operator: Annotated[
+        User,
+        Depends(require_permissions(PermissionCode.WORK_ORDER_UPDATE)),
+    ],
+) -> ApiResponse[WorkOrderDetail]:
+    # 四个动作里只有这个要请求体，因为只有它有一个"为什么"要说
+    ip_address = request.client.host if request.client else None
+    updated = WorkOrderService(db).reject_work_order(
+        work_order_id=work_order_id,
+        reason=payload.reason,
         operator=operator,
         request_path=request.url.path,
         ip_address=ip_address,

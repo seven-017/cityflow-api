@@ -248,9 +248,10 @@ class WorkOrderService:
         调度员看到光秃秃一句"操作失败"，是不知道该改什么的。
         权限那道在路由层就被 require_permissions 挡掉了，所以这儿只剩三道。
 
-        注意这里是"先查、再判、最后改"。这一步先这么做，因为单线程下它完全正确。
-        真正的窟窿在并发那儿 —— 两个人同时点分派会发生什么，
-        等下一步做状态流转的时候一起说。
+        注意这里是"先查、再判、最后改"。单线程下它完全正确。
+        并发下的窟窿跟下面 _transition 那边是一模一样的 ——
+        2026-09-30 在那边实测复现了（两边都是同一个写法），
+        现象和数字记在那个方法的注释里。改的时候两处一起改。
         """
         work_order = self.work_orders.get_by_id(work_order_id)
         if work_order is None:
@@ -323,3 +324,208 @@ class WorkOrderService:
         self.db.commit()
         self.db.refresh(work_order)
         return work_order_detail(work_order)
+
+    def _transition(
+        self,
+        *,
+        work_order_id: int,
+        action: WorkOrderAction,
+        operator: User,
+        request_path: str,
+        ip_address: str | None,
+        reason: str | None = None,
+        completion_date: date | None = None,
+    ) -> WorkOrderDetail:
+        """四个流转动作共用的那段，单独抽出来。
+
+        开始 / 完成 / 关闭 / 驳回这四件事，除了「动作不一样」和「要不要额外写一列」，
+        别的几步一模一样：查单 -> 挡官方只读数据 -> 过状态机 -> 改状态 ->
+        落流水 -> 落日志 -> 一起提交。抄四遍的话，哪天要加一道闸门就得改四处，
+        漏掉一处的表现是"那个动作漏了一道校验"，不会有任何报错提醒你。
+
+        跟分派那条比，这儿少一道闸门（被派的人存不存在）——
+        那几个动作不需要指定人，谁点的就是谁。
+
+        注意这里是"先查、再判、最后改"。单线程下它完全正确，
+        但在并发下有窟窿，2026-09-30 实测复现过。现象和数字记在下面那段注释里。
+        这一版先这么放着，修法下一步做。
+        """
+
+        # ================= 已知问题：并发 =================
+        #
+        # 上面那句"先查、再判、最后改"，两个人同时点会出事。
+        # 2026-09-30 用两个连接加一道栅栏把交错手工摆出来，回回都能复现
+        # （探针是一次性的，跑完就删了，没进仓库）：
+        #
+        #     T1 点开始：动手前读到 ASSIGNED -> 成功，返回 IN_PROGRESS
+        #     T2 点驳回：动手前读到 ASSIGNED -> 成功，返回 REJECTED
+        #     最终状态：REJECTED
+        #     流水 4 行：None->PENDING / PENDING->ASSIGNED
+        #                / ASSIGNED->IN_PROGRESS / ASSIGNED->REJECTED
+        #
+        # 麻烦的是最后那两行：两个从 ASSIGNED 出发、方向相反的流转，都写进去了。
+        # 而工单只有一个最终状态。事后翻流水，说不清这单到底是被开工了还是被驳回了。
+        #
+        # 更烦的是 T1 那边看到的是 200 加一个 IN_PROGRESS ——
+        # 界面上写着"已开工"，库里其实是 REJECTED。用户不会起疑，
+        # 一直要到有人拿着流水来对账才发现，那时候已经说不清是谁的错了。
+        #
+        # 根子在哪儿：判完到写库之间没有任何东西拦着别人，
+        # 两个事务都读到 ASSIGNED，两边都觉得自己这个动作合法。
+        # 这跟"加个锁"是两回事 —— 加锁能挡住，但挡的是"同时写"，
+        # 挡不住"基于一个已经过期的状态做判断"。要挡的是后者。
+        #
+        # 分派那条（assign_work_order）是一模一样的写法，同一个窟窿。
+        # 修的时候两处一起改。
+        # ==================================================
+
+        work_order = self.work_orders.get_by_id(work_order_id)
+        if work_order is None:
+            raise NotFoundException(f"Work order {work_order_id} not found.")
+
+        # 闸门一：数据源。跟分派那边同一句话 —— 官方导进来的是只读的，
+        # 它代表"已经发生过的事"，谁改了都说不清
+        if work_order.data_source != DATA_SOURCE_PLATFORM:
+            raise PermissionDeniedException(
+                f"Work order {work_order_id} is imported public data, "
+                f"cannot run {action.value}."
+            )
+
+        # 闸门二：状态。还是 18a 那张允许表说了算，这里不重复写规则
+        current_status = WorkOrderStatus(work_order.status)
+        target_status = resolve_transition(current_status, action)
+
+        # 改状态。status_origin 顺手也记成 PLATFORM ——
+        # 从这一刻起这个状态是人改出来的，不再是导入时推的
+        work_order.status = target_status.value
+        work_order.status_origin = "PLATFORM"
+        # 只有"完成"要额外写一列完工日期，别的动作传 None 进来，什么都不做。
+        # 没用 dict 传列名，是因为那样得 setattr 动态赋值 ——
+        # 写错列名的表现是"悄悄多了一个没人认识的属性"，不报错，很难查
+        if completion_date is not None:
+            work_order.completion_date = completion_date
+
+        # 先 flush 让 UPDATE 发出去。顺带一个好处：真出错也是在这行炸，不用拖到 commit
+        self.db.flush()
+
+        # 流水里存 reason（驳回原因）。别的动作没这个值，就存 NULL。
+        #
+        # reason 只写流水、不写操作日志，这是故意的：
+        # 操作日志管的是"谁在什么时候做了什么"，驳回原因是工单自己的业务数据。
+        # 两处都存的话，将来只改一处就会不一致 —— 而这两张表的一致性没人会去查
+        self.work_orders.add_status_history(
+            WorkOrderStatusHistory(
+                work_order_id=work_order.id,
+                from_status=current_status.value,
+                to_status=target_status.value,
+                operator_id=operator.id,
+                reason=reason,
+            )
+        )
+
+        self.logs.add(
+            user_id=operator.id,
+            operation=f"{action.value}_WORK_ORDER",
+            module="work_order",
+            target_type="work_order",
+            target_id=str(work_order.id),
+            request_method="POST",
+            request_path=request_path,
+            result="SUCCESS",
+            detail=f"status={current_status.value}->{target_status.value}",
+            ip_address=ip_address,
+        )
+
+        # 跟前面几个接口一样，改数据 + 流水 + 日志一次性提交，不留半截
+        self.db.commit()
+        self.db.refresh(work_order)
+        return work_order_detail(work_order)
+
+    # ---------------------------------------------------------------
+    # 下面四个是外面真正调的接口，各自只负责"传哪个动作进去"。
+    # 之所以不合成一个 POST /transition 让前端传 action：那样前端就得多知道一件事
+    # （动作名怎么写），而且权限点也没法按动作分开了。
+    # 拆成四条路径，前端调用的时候意图是明的。
+    # ---------------------------------------------------------------
+
+    def start_work_order(
+        self,
+        *,
+        work_order_id: int,
+        operator: User,
+        request_path: str,
+        ip_address: str | None,
+    ) -> WorkOrderDetail:
+        """ASSIGNED -> IN_PROGRESS。工程师接了活，开干。"""
+        return self._transition(
+            work_order_id=work_order_id,
+            action=WorkOrderAction.START,
+            operator=operator,
+            request_path=request_path,
+            ip_address=ip_address,
+        )
+
+    def complete_work_order(
+        self,
+        *,
+        work_order_id: int,
+        operator: User,
+        request_path: str,
+        ip_address: str | None,
+    ) -> WorkOrderDetail:
+        """IN_PROGRESS -> COMPLETED。干完了，顺手把完工日期填上。
+
+        用 date.today() 而不是让前端传：完工日期该是服务器这边记的"记录时间"，
+        前端传的话，用户手机上日期不对就会写进去一个错的日期。
+        """
+        return self._transition(
+            work_order_id=work_order_id,
+            action=WorkOrderAction.COMPLETE,
+            operator=operator,
+            request_path=request_path,
+            ip_address=ip_address,
+            completion_date=date.today(),
+        )
+
+    def close_work_order(
+        self,
+        *,
+        work_order_id: int,
+        operator: User,
+        request_path: str,
+        ip_address: str | None,
+    ) -> WorkOrderDetail:
+        """COMPLETED -> CLOSED。收尾归档。到这儿这单就彻底结束了。"""
+        return self._transition(
+            work_order_id=work_order_id,
+            action=WorkOrderAction.CLOSE,
+            operator=operator,
+            request_path=request_path,
+            ip_address=ip_address,
+        )
+
+    def reject_work_order(
+        self,
+        *,
+        work_order_id: int,
+        reason: str,
+        operator: User,
+        request_path: str,
+        ip_address: str | None,
+    ) -> WorkOrderDetail:
+        """PENDING / ASSIGNED -> REJECTED。这单做不了，退回去。
+
+        reason 必填，在 schema 那一层就挡了（空串直接 422）。
+
+        注意这里不清 assigned_to_id：单子被驳回的时候，它还留着"曾经派给过谁"——
+        那是历史事实，抹掉就查不出是谁退回的了。要查是谁驳回的看流水，
+        要查原本派给谁看这一列。
+        """
+        return self._transition(
+            work_order_id=work_order_id,
+            action=WorkOrderAction.REJECT,
+            operator=operator,
+            request_path=request_path,
+            ip_address=ip_address,
+            reason=reason,
+        )

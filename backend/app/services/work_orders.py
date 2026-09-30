@@ -3,13 +3,24 @@ from datetime import date
 
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import NotFoundException
-from app.core.work_order_status import WorkOrderStatus
+from app.core.exceptions import (
+    BusinessException,
+    NotFoundException,
+    PermissionDeniedException,
+)
+from app.core.permissions import RoleCode
+from app.core.work_order_status import (
+    WorkOrderAction,
+    WorkOrderStatus,
+    resolve_transition,
+)
 from app.models import User, WorkOrder, WorkOrderStatusHistory
 from app.repositories.operation_logs import OperationLogRepository
+from app.repositories.users import UserRepository
 from app.repositories.work_orders import WorkOrderRepository
 from app.schemas.common import CursorMeta
 from app.schemas.work_orders import (
+    WorkOrderAssignRequest,
     WorkOrderCreateRequest,
     WorkOrderDetail,
     WorkOrderSummary,
@@ -62,6 +73,7 @@ def work_order_detail(work_order: WorkOrder) -> WorkOrderDetail:
         completion_date=work_order.completion_date,
         scheduled_end_date=work_order.scheduled_end_date,
         assigned_title=work_order.assigned_title,
+        assigned_to_id=work_order.assigned_to_id,
         source_notes=work_order.source_notes,
         duration=work_order.duration,
         job_type=work_order.job_type,
@@ -69,6 +81,14 @@ def work_order_detail(work_order: WorkOrder) -> WorkOrderDetail:
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
     )
+
+
+# 双数据源的两面旗子。官方导进来的那批是 REAL_PUBLIC（只读，谁都不许改），
+# 平台自己录的走 SYNTHETIC_PLATFORM。
+# 每个写操作的第一道闸门都要拿这个值比，所以起两个名字放这儿，别到处写字符串 ——
+# 手写字符串敲错了不会报错，只会让闸门的结果跟你以为的不一样，那种错最难查。
+DATA_SOURCE_PUBLIC = "REAL_PUBLIC"
+DATA_SOURCE_PLATFORM = "SYNTHETIC_PLATFORM"
 
 
 # 平台自己录的工单用它自己的一套编号：PF- 后面跟 12 位十六进制。
@@ -96,6 +116,9 @@ class WorkOrderService:
         self.db = db
         self.work_orders = WorkOrderRepository(db)
         self.logs = OperationLogRepository(db)
+        # 分派得把单派到人身上，所以这儿也要一个用户仓储。
+        # repository 是按表切的，service 组合几个都行 —— system 那边就同时用了三个
+        self.users = UserRepository(db)
 
     def list_work_orders(
         self, *, after_id: int | None, limit: int
@@ -155,7 +178,7 @@ class WorkOrderService:
             # 双数据源隔离的落点。官方导入的那些是 REAL_PUBLIC（只读，不许动），
             # 平台自己录的走 SYNTHETIC_PLATFORM。这一列决定了后面分派、流转、
             # 加处理记录时第一道闸门放不放行 —— 写错了后面全被挡
-            data_source="SYNTHETIC_PLATFORM",
+            data_source=DATA_SOURCE_PLATFORM,
             description=payload.description,
             work_type=payload.work_type,
             asset_source_record_id=payload.asset_source_record_id,
@@ -207,5 +230,96 @@ class WorkOrderService:
 
         # created_at / updated_at 是数据库 server_default 生成的，
         # 提交之后 ORM 里那份还是旧的，刷一下再搬给 schema
+        self.db.refresh(work_order)
+        return work_order_detail(work_order)
+
+    def assign_work_order(
+        self,
+        *,
+        work_order_id: int,
+        assignee_id: int,
+        operator: User,
+        request_path: str,
+        ip_address: str | None,
+    ) -> WorkOrderDetail:
+        """把一张待处理的单派给某个工程师。
+
+        这个接口前后有四个闸门，按顺序过，哪道没过就停在哪道。报错要能分清是哪一种 ——
+        调度员看到光秃秃一句"操作失败"，是不知道该改什么的。
+        权限那道在路由层就被 require_permissions 挡掉了，所以这儿只剩三道。
+
+        注意这里是"先查、再判、最后改"。这一步先这么做，因为单线程下它完全正确。
+        真正的窟窿在并发那儿 —— 两个人同时点分派会发生什么，
+        等下一步做状态流转的时候一起说。
+        """
+        work_order = self.work_orders.get_by_id(work_order_id)
+        if work_order is None:
+            raise NotFoundException(f"Work order {work_order_id} not found.")
+
+        # 闸门一：数据源。官方导进来那批是只读的 ——
+        # 这不是我们定的规矩，是业务文档写死的：那批数据代表"已经发生过的事"，
+        # 谁改了就说不清了。只有平台自己录的单才允许流转
+        if work_order.data_source != DATA_SOURCE_PLATFORM:
+            raise PermissionDeniedException(
+                f"Work order {work_order_id} is imported public data, cannot be assigned."
+            )
+
+        # 闸门二：状态。拿 18a 那张允许表来判断，别在这儿再写一遍 if ——
+        # 规则只有一份，在 core/work_order_status.py 里
+        current_status = WorkOrderStatus(work_order.status)
+        target_status = resolve_transition(current_status, WorkOrderAction.ASSIGN)
+
+        # 闸门三：被派的人得真的能干活。这三件事一次查出来
+        # （get_by_id 顺手把 roles 也捞回来了），不是循环里一条条查
+        assignee = self.users.get_by_id(assignee_id)
+        if assignee is None:
+            raise NotFoundException(f"User {assignee_id} not found.")
+        if not assignee.enabled:
+            raise BusinessException(
+                f"User {assignee_id} is disabled, cannot take work orders."
+            )
+        if not any(role.code == RoleCode.ENGINEER for role in assignee.roles):
+            raise BusinessException(
+                f"User {assignee_id} is not an engineer, cannot be assigned."
+            )
+
+        # 三道全过了。要改的是两列：状态往后走一格，同时记下派给了谁
+        work_order.assigned_to_id = assignee.id
+        work_order.status = target_status.value
+        # 状态来源换成 PLATFORM —— 从这一格起，这个状态是人改的，不再是导入推导出来的
+        work_order.status_origin = "PLATFORM"
+
+        # 先 flush 让 UPDATE 发出去，后面两条记录才好在同一个事务里跟上。
+        # 顺带一个好处：真要是 UPDATE 出错，异常在这行就炸了，不用拖到 commit 才发现
+        self.db.flush()
+
+        # 流水里的 from_status 用的是改之前那个状态，所以上面特意先存成 current_status ——
+        # 要是直接读 work_order.status，那会儿它已经被改成 ASSIGNED 了，
+        # 流水就会写成"ASSIGNED -> ASSIGNED"这种自己到自己的鬼话
+        self.work_orders.add_status_history(
+            WorkOrderStatusHistory(
+                work_order_id=work_order.id,
+                from_status=current_status.value,
+                to_status=target_status.value,
+                operator_id=operator.id,
+            )
+        )
+
+        self.logs.add(
+            user_id=operator.id,
+            operation="ASSIGN_WORK_ORDER",
+            module="work_order",
+            target_type="work_order",
+            target_id=str(work_order.id),
+            request_method="POST",
+            request_path=request_path,
+            result="SUCCESS",
+            detail=f"assigned_to={assignee.username}",
+            ip_address=ip_address,
+        )
+
+        # 四件事一起提交：改状态、写派单人、落流水、落日志。
+        # 少任何一样这单都说不清楚 —— 状态变了却没流水，就是"它凭空跳过了一步"
+        self.db.commit()
         self.db.refresh(work_order)
         return work_order_detail(work_order)

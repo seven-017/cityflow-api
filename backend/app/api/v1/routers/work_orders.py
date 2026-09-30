@@ -8,6 +8,7 @@ from app.core.permissions import PermissionCode
 from app.models import User
 from app.schemas.common import ApiResponse, CursorResponse
 from app.schemas.work_orders import (
+    WorkOrderAssignRequest,
     WorkOrderCreateRequest,
     WorkOrderDetail,
     WorkOrderSummary,
@@ -72,3 +73,29 @@ def get_work_order(
 ) -> ApiResponse[WorkOrderDetail]:
     # work_order_id 是路径参数，FastAPI 自己转 int，传 abc 会甩 422
     return ApiResponse(data=WorkOrderService(db).get_work_order(work_order_id))
+
+
+@router.post("/{work_order_id}/assign", response_model=ApiResponse[WorkOrderDetail])
+def assign_work_order(
+    work_order_id: int,
+    payload: WorkOrderAssignRequest,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    # 分派要的是 work_order:assign。这个权限点天然把"调度"和"干活"分开了：
+    # ADMIN / DISPATCHER 有，ENGINEER 和 VIEWER 没有 ——
+    # 所以"工程师只能接活不能派活"这句话，在权限层就已经说完了，
+    # 函数体里一行角色判断都不用写
+    operator: Annotated[
+        User,
+        Depends(require_permissions(PermissionCode.WORK_ORDER_ASSIGN)),
+    ],
+) -> ApiResponse[WorkOrderDetail]:
+    ip_address = request.client.host if request.client else None
+    updated = WorkOrderService(db).assign_work_order(
+        work_order_id=work_order_id,
+        assignee_id=payload.assignee_id,
+        operator=operator,
+        request_path=request.url.path,
+        ip_address=ip_address,
+    )
+    return ApiResponse(data=updated)

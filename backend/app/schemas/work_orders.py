@@ -76,6 +76,11 @@ class WorkOrderDetail(BaseModel):
     completion_date: date | None
     scheduled_end_date: date | None
     assigned_title: str | None
+    # 这一列原来被砍掉了，理由是"官方数据里 100% 是 NULL，给了也是一片空白"。
+    # 现在平台工单能分派了，它有了真实含义，所以加回来 ——
+    # 砍掉一个字段的依据是"这一列有没有值"，依据变了就得跟着改，
+    # 不然就会出现"功能做完了但前端拿不到结果"这种事
+    assigned_to_id: int | None
     source_notes: str | None
     duration: str | None
     job_type: str | None
@@ -106,3 +111,14 @@ class WorkOrderCreateRequest(BaseModel):
     # 而这列在模型上本来就可空，没必要为了好看多搭一次查询
     asset_source_record_id: str | None = Field(default=None, max_length=100)
     scheduled_end_date: date | None = None
+
+
+class WorkOrderAssignRequest(BaseModel):
+    """分派工单时只传一个东西：派给谁。
+
+    被派的那个人是不是存在、有没有被停用、是不是 ENGINEER —— 这些都不在这儿校验，
+    得去 service 里查库。schema 只管"这个字段本身合不合法"（负数 id 直接 422），
+    管不了"库里到底有没有这个人"。
+    """
+
+    assignee_id: int = Field(gt=0)

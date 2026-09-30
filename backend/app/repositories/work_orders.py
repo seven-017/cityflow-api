@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import WorkOrder
+from app.models import WorkOrder, WorkOrderStatusHistory
 
 
 class WorkOrderRepository:
@@ -54,3 +54,18 @@ class WorkOrderRepository:
     # 记一笔当时排除的路子：本来说"上 Redis 缓存一下"，
     # 但缓存该给"确实需要、而且算起来贵"的东西用。这个数字不需要（游标分页跳不了页），
     # 也不值得为它引一整个 Redis 组件。真要看总量就该放 Dashboard 里缓存一次给整页复用。
+
+    def add(self, work_order: WorkOrder) -> WorkOrder:
+        """插一条工单。
+
+        注意这里只 add 不 commit，提交时机交给 service ——
+        跟 OperationLogRepository.add 那边一个道理：
+        创建工单要同时写三张表（工单 + 状态流水 + 操作日志），
+        得一起成功或者一起失败，中途谁都不能自己先提交一次。
+        """
+        self.db.add(work_order)
+        return work_order
+
+    def add_status_history(self, history: WorkOrderStatusHistory) -> None:
+        """插一条状态流水。同样不 commit，理由见上面。"""
+        self.db.add(history)

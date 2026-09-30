@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class WorkOrderSummary(BaseModel):
@@ -82,3 +82,27 @@ class WorkOrderDetail(BaseModel):
     source_update_count: int | None
     created_at: datetime
     updated_at: datetime
+
+
+class WorkOrderCreateRequest(BaseModel):
+    """平台自己录一条工单时，前端要传什么。
+
+    这里只留四个字段，不是把 WorkOrder 那 37 列倒过来抄一遍。
+    挑选方向和详情页正好相反：详情页是"能给人看的尽量给"，
+    这里是"不填就干不了活的才留"。
+
+    description 是唯一必填的 —— 模型上它本来就是 nullable=False，
+    而且一条没写描述的工单，拿给工程师他也不知道要去干什么。
+
+    这几个 max_length 是照模型上对应列的长度写的，不是随手定的：
+    在这儿挡住，前端当场拿到明确的 422，不用等写库那一步才炸。
+    """
+
+    description: str = Field(min_length=1, max_length=2000)
+    # 官方数据里实测就 JOB / IN / AA / PPM / STAT / MRC 这几种，平台工单沿用这套
+    work_type: str | None = Field(default=None, max_length=150)
+    # 关联哪个资产。这儿存的是资产的来源编号（字符串），不是 assets.id。
+    # 理由是平台录入时手上只有编号；真要换成 id 就得先查一次库，
+    # 而这列在模型上本来就可空，没必要为了好看多搭一次查询
+    asset_source_record_id: str | None = Field(default=None, max_length=100)
+    scheduled_end_date: date | None = None

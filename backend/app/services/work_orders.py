@@ -11,6 +11,7 @@ from app.core.exceptions import (
 )
 from app.core.permissions import RoleCode
 from app.core.work_order_status import (
+    ENGINEER_ALLOWED_ACTIONS,
     WorkOrderAction,
     WorkOrderStatus,
     resolve_transition,
@@ -111,6 +112,20 @@ SOURCE_RECORD_ID_PREFIX = "PF-"
 def generate_source_record_id() -> str:
     """生成一个平台工单号，长这样：PF-3f9a2c81b7d4。"""
     return SOURCE_RECORD_ID_PREFIX + secrets.token_hex(6)
+
+
+def is_manager(user: User) -> bool:
+    """这个人是管理型角色吗（ADMIN / DISPATCHER）。
+
+    文档里说"Admin 和 Dispatcher 可以执行管理型转换"，所以这两类人不吃
+    "只能碰自己的单"和"只能开始/完成"那两条限制 —— 调度本来就是替别人排活的。
+
+    user.roles 在模型上是 lazy="selectin"，取用户的时候已经用一条 IN 语句
+    把角色一起捞回来了（顺便还带了权限），所以这儿循环一遍不会再打查询。
+    """
+    return any(
+        role.code in (RoleCode.ADMIN, RoleCode.DISPATCHER) for role in user.roles
+    )
 
 
 class WorkOrderService:
@@ -408,7 +423,33 @@ class WorkOrderService:
                 f"cannot run {action.value}."
             )
 
-        # 闸门二：状态。还是 18a 那张允许表说了算，这里不重复写规则
+        # 闸门二：这个动作归不归你。文档里关于工单的三条规则，这儿落两条
+        # （第三条"ASSIGNED 必须通过分派接口设置工程师"在 assign_work_order 那边）：
+        #
+        #     "Engineer 只能更新分配给自己的工单。"
+        #     "Engineer 只能执行 ASSIGNED -> IN_PROGRESS 和 IN_PROGRESS -> COMPLETED。"
+        #
+        # 这两句是分开的两件事，都得判：第一句管"哪张单"，第二句管"哪个动作"。
+        # 少判第一句，工程师能把别人手上的单点成已完成；
+        # 少判第二句，工程师能自己驳回自己接不了的活，或者干脆把单关掉。
+        #
+        # 2026-10-01 补的。18d 刚做出来的时候这儿是空的，四个动作全挂在
+        # work_order:update 那个权限点上，等于上面那两个洞都敞着 ——
+        # 而"谁能调这个接口"在路由层就过掉了，service 里一行判断都没有。
+        # 当时是照 business-rules.md 做了个"取宽"的决定（那份文档的权限表和
+        # 正文自相矛盾：表格说 ENGINEER 只有 update，正文说工程师可以驳回），
+        # 后来在 architecture.md 里看到上面那两句原话，才知道挑错了。
+        if not is_manager(operator):
+            if action not in ENGINEER_ALLOWED_ACTIONS:
+                raise PermissionDeniedException(
+                    f"Role cannot run {action.value} on a work order."
+                )
+            if work_order.assigned_to_id != operator.id:
+                raise PermissionDeniedException(
+                    f"Work order {work_order_id} is not assigned to you."
+                )
+
+        # 闸门三：状态。还是 18a 那张允许表说了算，这里不重复写规则
         current_status = WorkOrderStatus(work_order.status)
         target_status = resolve_transition(current_status, action)
 

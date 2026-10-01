@@ -105,19 +105,19 @@ def assign_work_order(
 
 
 # ---------------------------------------------------------------------------
-# 状态流转的四个动作。权限点全都是 work_order:update —— 也就是说
-# ADMIN / DISPATCHER / ENGINEER 都能调，VIEWER 没有 update 会被 403 挡掉。
+# 状态流转的四个动作。权限是两层的 —— 只看这儿那个 Depends，会以为工程师什么都能干：
 #
-# 这里有个文档上的矛盾，记一笔，免得以后有人看见觉得写错了：
-# business-rules.md 的权限表里 ENGINEER 只有 work_order:update，
-# 但同一篇的正文又写着"工程师可以驳回做不了的工单"。两处对不上。
-# 取了口径宽的那一侧（驳回也能做），理由是：
-#   1. 正文那句话本身就是需求，表格大概是漏了；
-#   2. 我们的权限点是灌库的种子数据，项目里没有 seed.py，
-#      为一个动作单开权限点要同时动 permissions 表、role_permissions 表
-#      和 PermissionCode 三处，代价和收益不成比例。
-# 真要收紧的话，加一个 work_order:reject 权限点、只给 ADMIN / DISPATCHER，
-# 然后把这四个路由的依赖按动作拆开就行 —— 改起来是一处的事。
+#   第一层 路由上的 work_order:update：能不能碰工单。
+#          ADMIN / DISPATCHER / ENGINEER 有，VIEWER 没有，到这儿就被 403 挡掉。
+#   第二层 service 里按角色和归属判：能碰工单的人里，哪个动作归谁。
+#          ENGINEER 只能对"派给自己的那张单"做 START / COMPLETE
+#          （规则在 core/work_order_status.py 的 ENGINEER_ALLOWED_ACTIONS），
+#          ADMIN / DISPATCHER 不吃这两条限制。
+#
+# 第二层为什么不也做成权限点（比如单开一个 work_order:reject）：一小半是因为
+# 项目里没有 seed.py，权限点是直接灌库的，为一个动作要同时动 permissions 表、
+# role_permissions 表和 PermissionCode 三处；更大一半是因为"只能操作自己的单"
+# 这条根本表达不成权限点 —— 它是数据级的判断，得知道具体是哪张单、派给了谁。
 #
 # 另外一个偷懒的地方：这四个函数体长得几乎一模一样，只有调用的 service 方法不同。
 # 没抽工厂函数，因为 FastAPI 认的是函数签名（那些 Annotated[..., Depends(...)]），
@@ -224,7 +224,10 @@ def add_work_order_record(
     request: Request,
     db: Annotated[Session, Depends(get_db)],
     # 权限还是 work_order:update：能改这张单的人就能在它底下写备注。
-    # 没为"写备注"单开一个权限点，理由跟驳回那儿一样（见上面那段注释）
+    # 不吃上面那两条角色限制 —— 那两条管的是"谁能推动这张单"（状态流转），
+    # 写备注不推状态。所以工程师路过别人的单、留一句"泵在响"，这是允许的；
+    # 文档里那句"Engineer 只能更新分配给自己的工单"说的是改工单那一行，
+    # 不含它下面的子资源
     operator: Annotated[
         User,
         Depends(require_permissions(PermissionCode.WORK_ORDER_UPDATE)),

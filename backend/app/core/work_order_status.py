@@ -60,6 +60,25 @@ ALLOWED_TRANSITIONS: dict[WorkOrderStatus, set[WorkOrderStatus]] = {
 }
 
 
+# 工程师能执行哪几个流转动作。
+#
+# 原话在 architecture.md 里："Engineer 只能执行 ASSIGNED -> IN_PROGRESS 和
+# IN_PROGRESS -> COMPLETED。Admin 和 Dispatcher 可以执行管理型转换。"
+# 说白了：开始和完成是"干活的人干完了自己那摊活"，驳回和关闭是"这张单接下来怎么走"，
+# 后者归调度和管理。
+#
+# 写"允许的"而不是"禁止的"，是因为将来加新动作的时候，默认会落到
+# "工程师不能做"这一边 —— 漏配置的后果是多一道闸门（顶多多问一嘴），
+# 而不是少一道（可能被人绕过去）。
+#
+# 注意这个跟权限点不是一回事，别混。work_order:update 管的是
+# "你能不能碰工单"，四个角色里三个都有；这张表管的是"能碰工单的人里，
+# 哪个动作归谁"。两层都要过，缺一层就是漏洞。
+ENGINEER_ALLOWED_ACTIONS: frozenset[WorkOrderAction] = frozenset(
+    {WorkOrderAction.START, WorkOrderAction.COMPLETE}
+)
+
+
 def resolve_transition(
     current: WorkOrderStatus,
     action: WorkOrderAction,

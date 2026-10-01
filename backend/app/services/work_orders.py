@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import (
     BusinessException,
+    ConcurrentUpdateException,
     NotFoundException,
     PermissionDeniedException,
 )
@@ -248,10 +249,9 @@ class WorkOrderService:
         调度员看到光秃秃一句"操作失败"，是不知道该改什么的。
         权限那道在路由层就被 require_permissions 挡掉了，所以这儿只剩三道。
 
-        注意这里是"先查、再判、最后改"。单线程下它完全正确。
-        并发下的窟窿跟下面 _transition 那边是一模一样的 ——
-        2026-09-30 在那边实测复现了（两边都是同一个写法），
-        现象和数字记在那个方法的注释里。改的时候两处一起改。
+        注意这里是"先查、再判、最后改"。并发下那段空隙跟下面 _transition 一模一样
+        （2026-09-30 在那边复现过，现象和数字记在那个方法的注释里），
+        修的时候两处一起改的，都是同一句带条件的 UPDATE。
         """
         work_order = self.work_orders.get_by_id(work_order_id)
         if work_order is None:
@@ -284,15 +284,23 @@ class WorkOrderService:
                 f"User {assignee_id} is not an engineer, cannot be assigned."
             )
 
-        # 三道全过了。要改的是两列：状态往后走一格，同时记下派给了谁
-        work_order.assigned_to_id = assignee.id
-        work_order.status = target_status.value
-        # 状态来源换成 PLATFORM —— 从这一格起，这个状态是人改的，不再是导入推导出来的
-        work_order.status_origin = "PLATFORM"
+        # 三道全过了。要改的是两列：状态往后走一格，同时记下派给了谁。
+        # 跟 _transition 一样走带条件的 UPDATE —— 两个人同时点分派，
+        # 后到的那个匹配不到行、拿到 0，然后老实报"有人先动手了"
+        affected = self.work_orders.apply_transition(
+            work_order_id=work_order.id,
+            from_status=current_status.value,
+            to_status=target_status.value,
+            extra_values={"assigned_to_id": assignee.id},
+        )
+        if affected == 0:
+            raise ConcurrentUpdateException(
+                f"Work order {work_order_id} was changed by someone else, "
+                f"reload and try again."
+            )
 
-        # 先 flush 让 UPDATE 发出去，后面两条记录才好在同一个事务里跟上。
-        # 顺带一个好处：真要是 UPDATE 出错，异常在这行就炸了，不用拖到 commit 才发现
-        self.db.flush()
+        # 同上：绕过 ORM 改的，刷新一下再往下走
+        self.db.refresh(work_order)
 
         # 流水里的 from_status 用的是改之前那个状态，所以上面特意先存成 current_status ——
         # 要是直接读 work_order.status，那会儿它已经被改成 ASSIGNED 了，
@@ -346,16 +354,15 @@ class WorkOrderService:
         跟分派那条比，这儿少一道闸门（被派的人存不存在）——
         那几个动作不需要指定人，谁点的就是谁。
 
-        注意这里是"先查、再判、最后改"。单线程下它完全正确，
-        但在并发下有窟窿，2026-09-30 实测复现过。现象和数字记在下面那段注释里。
-        这一版先这么放着，修法下一步做。
+        注意这里是"先查、再判、最后改"。判完到写库之间那段空隙，原来是敞着的，
+        两个请求前后脚进来就会双双通过。2026-09-30 复现过，修法也写在下面那段注释里。
         """
 
-        # ================= 已知问题：并发 =================
+        # ================= 并发：先说清楚原来错在哪 =================
         #
-        # 上面那句"先查、再判、最后改"，两个人同时点会出事。
-        # 2026-09-30 用两个连接加一道栅栏把交错手工摆出来，回回都能复现
-        # （探针是一次性的，跑完就删了，没进仓库）：
+        # 这个方法是"先查、再判、最后改"。最早那版判完就直接改对象属性，
+        # 判完到写库之间没有任何东西拦着别人。2026-09-30 用两个连接加一道栅栏
+        # 把交错手工摆出来（探针是一次性的，不进仓库），回回都能复现：
         #
         #     T1 点开始：动手前读到 ASSIGNED -> 成功，返回 IN_PROGRESS
         #     T2 点驳回：动手前读到 ASSIGNED -> 成功，返回 REJECTED
@@ -363,21 +370,27 @@ class WorkOrderService:
         #     流水 4 行：None->PENDING / PENDING->ASSIGNED
         #                / ASSIGNED->IN_PROGRESS / ASSIGNED->REJECTED
         #
-        # 麻烦的是最后那两行：两个从 ASSIGNED 出发、方向相反的流转，都写进去了。
-        # 而工单只有一个最终状态。事后翻流水，说不清这单到底是被开工了还是被驳回了。
+        # 麻烦的是最后两行：两个从 ASSIGNED 出发、方向相反的流转，都写进去了，
+        # 而工单只有一个最终状态。事后翻流水，说不清它是被开工了还是被驳回了。
+        # 更烦的是 T1 拿到的是 200 加一个 IN_PROGRESS —— 界面上写着"已开工"，
+        # 库里其实是 REJECTED，一直要到有人拿着流水来对账才发现。
         #
-        # 更烦的是 T1 那边看到的是 200 加一个 IN_PROGRESS ——
-        # 界面上写着"已开工"，库里其实是 REJECTED。用户不会起疑，
-        # 一直要到有人拿着流水来对账才发现，那时候已经说不清是谁的错了。
+        # 根子在哪儿：两个事务都读到 ASSIGNED，两边都觉得自己这个动作合法。
+        # 这跟"加锁"不是一回事 —— 行锁挡的是"同时写"，挡不住"基于一个已经过期的
+        # 状态做判断"：后到的人照样能拿到锁、照样能写，他只是不该写。
         #
-        # 根子在哪儿：判完到写库之间没有任何东西拦着别人，
-        # 两个事务都读到 ASSIGNED，两边都觉得自己这个动作合法。
-        # 这跟"加个锁"是两回事 —— 加锁能挡住，但挡的是"同时写"，
-        # 挡不住"基于一个已经过期的状态做判断"。要挡的是后者。
+        # 修法就是下面那句带条件的 UPDATE。同一个交错再跑一遍：
         #
-        # 分派那条（assign_work_order）是一模一样的写法，同一个窟窿。
-        # 修的时候两处一起改。
-        # ==================================================
+        #     T1 点开始：成功，返回 IN_PROGRESS
+        #     T2 点驳回：40901，流水里没有它那一行
+        #     最终状态：IN_PROGRESS，流水 3 行
+        #
+        # 顺便记一个教训。这个修法第一次跑，探针里 T2 报的是
+        #     TypeError: ConflictException.__init__() got an unexpected keyword argument 'code'
+        # —— 我图省事想给 ConflictException 传个自定义码，可那个子类压根不收这个参数。
+        # 要命的是：46 项验收里没有并发场景，全绿；这个错只有探针撞得出来。
+        # 所以"改完再跑一遍探针"不是走形式。
+        # ============================================================
 
         work_order = self.work_orders.get_by_id(work_order_id)
         if work_order is None:
@@ -395,18 +408,31 @@ class WorkOrderService:
         current_status = WorkOrderStatus(work_order.status)
         target_status = resolve_transition(current_status, action)
 
-        # 改状态。status_origin 顺手也记成 PLATFORM ——
-        # 从这一刻起这个状态是人改出来的，不再是导入时推的
-        work_order.status = target_status.value
-        work_order.status_origin = "PLATFORM"
-        # 只有"完成"要额外写一列完工日期，别的动作传 None 进来，什么都不做。
-        # 没用 dict 传列名，是因为那样得 setattr 动态赋值 ——
-        # 写错列名的表现是"悄悄多了一个没人认识的属性"，不报错，很难查
+        # 只有"完成"要额外写一列完工日期，别的动作这是个空 dict
+        extra_values: dict[str, object] = {}
         if completion_date is not None:
-            work_order.completion_date = completion_date
+            extra_values["completion_date"] = completion_date
 
-        # 先 flush 让 UPDATE 发出去。顺带一个好处：真出错也是在这行炸，不用拖到 commit
-        self.db.flush()
+        # 带条件的 UPDATE：只有当前状态还是我刚才读到的那一格时才生效。
+        # 返回的是"真改了几行"，0 就说明有人在我判完之后先动手了
+        affected = self.work_orders.apply_transition(
+            work_order_id=work_order.id,
+            from_status=current_status.value,
+            to_status=target_status.value,
+            extra_values=extra_values,
+        )
+        if affected == 0:
+            # 走到这儿说明白忙一场：判断做得没错，但那份判断已经过期了。
+            # 好在流水和日志都还没写，直接抛出去，事务回滚，不留半截数据
+            raise ConcurrentUpdateException(
+                f"Work order {work_order_id} was changed by someone else, "
+                f"reload and try again."
+            )
+
+        # UPDATE 是绕过 ORM 发的（synchronize_session=False），session 里那份对象
+        # 还停在旧状态。下面的流水要用 work_order.id，最后 work_order_detail
+        # 还要读它一堆列，所以先刷新一次，别让后面的人拿到过期数据
+        self.db.refresh(work_order)
 
         # 流水里存 reason（驳回原因）。别的动作没这个值，就存 NULL。
         #

@@ -71,6 +71,27 @@ class ConflictException(BusinessException):
         )
 
 
+class ConcurrentUpdateException(BusinessException):
+    """两个人同时改同一行，后到的那个抢输了。
+
+    跟 ConflictException 一样是 409，但得分开，因为"接下来该干嘛"完全不同：
+
+        40900  ConflictException          这个动作在当前状态下就不允许 ——
+                                          用户点错了地方，得刷新看看现在到哪一步了；
+        40901  ConcurrentUpdateException  判断没错，只是慢了一步，
+                                          重新拉一次再点说不定就成了。
+
+    不分开的话前端拿到 409 只能一律让用户刷新，白丢一次本来能成功的操作。
+    """
+
+    def __init__(self, message: str = "Resource was modified concurrently.") -> None:
+        super().__init__(
+            message,
+            code=40901,
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+
 def error_payload(code: int, message: str, data: Any = None) -> dict[str, Any]:
     """出错时的返回体，字段跟成功时那个 ApiResponse 对齐。
 

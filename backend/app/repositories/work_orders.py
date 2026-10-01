@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import WorkOrder, WorkOrderStatusHistory
@@ -69,3 +69,53 @@ class WorkOrderRepository:
     def add_status_history(self, history: WorkOrderStatusHistory) -> None:
         """插一条状态流水。同样不 commit，理由见上面。"""
         self.db.add(history)
+
+    def apply_transition(
+        self,
+        *,
+        work_order_id: int,
+        from_status: str,
+        to_status: str,
+        extra_values: dict[str, object] | None = None,
+    ) -> int:
+        """改状态，但只在"当前状态还是我以为的那一个"时才改。返回真改了几行。
+
+        乐观锁就落在这一句 where 上。原来 service 那边是"先查出来、判断合法、
+        再把对象的属性改掉"，判完到写库之间没人拦着，两个人同时点就会双双通过
+        （2026-09-30 实测复现过：一个点开始一个点驳回，两条互斥的流水都写进去了）。
+        现在把"我读到的那个状态"一起塞进 where：
+        谁先提交，谁就把状态改走了，后到的那个 where 匹配不上、返回 0 行，
+        调用方一看 0 就知道"我基于的那份判断已经过期了"。
+
+        这跟加锁不是一回事。行锁能挡住"同时写"，挡不住"基于一个过期的状态做判断"——
+        后到的人照样能拿到锁、照样能写，他只是不该写。要拦的是这个"不该"。
+
+        两个 MySQL 的细节，都得记着：
+        1. rowcount 是"真正改了内容的行数"，不是"匹配上的行数"
+           （pymysql 默认没开 CLIENT_FOUND_ROWS）。所以这里能靠它判断，
+           前提是这条 UPDATE 每次都确实改了东西 —— 好在状态机保证 from 和 to
+           绝不会是同一个值（允许表里没有自环），所以 status 这一列必定变。
+           哪天要是有人给这条语句加个"值没变就不改"的优化，这个判断就塌了。
+        2. synchronize_session=False：不让 SQLAlchemy 顺手动 session 里那份对象。
+           它默认会试着算一下"怎么把内存里的实例同步过去"，在带条件的 UPDATE 上
+           那条路不一定对得上，算错了还不报错。我们只要行数，
+           对象那份让调用方 refresh 一下，反而清楚。
+        """
+        values: dict[str, object] = {
+            "status": to_status,
+            # 状态来源顺手记成 PLATFORM：从这一刻起这个状态是人改出来的
+            "status_origin": "PLATFORM",
+        }
+        if extra_values:
+            # 完成要写完工日期、分派要写派给了谁，各自从这儿塞进来。
+            # 用 dict 展开成列名是有意的：名字写错了 SQLAlchemy 编译时就炸，
+            # 不会静默变成一个没人认识的属性
+            values.update(extra_values)
+
+        statement = (
+            update(WorkOrder)
+            .where(WorkOrder.id == work_order_id, WorkOrder.status == from_status)
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+        return self.db.execute(statement).rowcount

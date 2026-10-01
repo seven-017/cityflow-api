@@ -40,13 +40,60 @@ class WorkOrderSummary(BaseModel):
     completion_date: date | None
 
 
+class WorkOrderStatusHistoryItem(BaseModel):
+    """一条状态流水：这单什么时候、被谁、从哪个状态推到了哪个状态。
+
+    from_status 可空，因为"建单"那一条是从无到有 ——
+    它不是从哪个状态过来的，是被造出来的，所以整个流水的第一行
+    from_status 是 null。别把它当成"数据缺失"。
+
+    也没带操作人的用户名，跟下面的 WorkOrderRecordItem 一个理由。
+    """
+
+    id: int
+    from_status: str | None
+    to_status: str
+    operator_id: int | None
+    # 只有驳回会带原因，别的动作都是 null
+    reason: str | None
+    created_at: datetime
+
+
+class WorkOrderRecordItem(BaseModel):
+    """一条处理记录：人在工单下面留的备注。
+
+    这是全项目第一个"子资源"的返回体 —— 前面几个接口都是返回工单本身，
+    这个不是。为什么单独给一个：加完备注之后，前端最需要的是
+    "我这条加上了，长这样"，好直接往列表末尾追加一条；
+    为了看清楚自己刚写的几个字再拉一次工单详情，纯属浪费。
+
+    详情页也复用它，所以详情里每一条会多出一个重复的 work_order_id
+    （外层返回的工单已经说了是哪张单了）。留着没删，是为了让"加备注"
+    和"看详情"返回的是同一种东西 —— 同一份数据长两个形状，早晚有人搞混。
+
+    没带用户名。要带就得 JOIN 一次 users，而前端本来就有用户表、
+    拿着 user_id 自己查得到。等真有页面需要"张三 5 分钟前说"这种展示，
+    再考虑是后端 JOIN 还是前端查。
+
+    （这个类的定义 2026-10-01 从文件末尾挪到了这儿：
+    WorkOrderDetail 要拿它当字段类型，而 Python 里被引用的类得先定义。
+    与其用字符串前向引用绕过去，不如把顺序摆正 —— 谁被引用谁靠前。）
+    """
+
+    id: int
+    work_order_id: int
+    user_id: int | None
+    content: str
+    created_at: datetime
+
+
 class WorkOrderDetail(BaseModel):
     """工单详情页里那条工单长什么样。
 
     跟 AssetDetail 一样，字段是"挑"出来的，不是把 WorkOrder 那 37 列抄一遍。
 
     挑选依据是各列的 NULL 占比（实测），所以这张名单会来回变 ——
-    砍掉一个字段的依据是"这一列到底有没有值"，**依据变了就得跟着改**。
+    砍掉一个字段的依据是"这一列到底有没有值"，「依据变了就得跟着改」。
     已经来回变过两次了，都记在这儿，免得后来的人看着纳闷：
 
         priority / sla_deadline / sla_source    砍过，又加回来
@@ -102,6 +149,26 @@ class WorkOrderDetail(BaseModel):
     sla_source: str | None
     created_at: datetime
     updated_at: datetime
+
+    # 下面两个是子表，不是 WorkOrder 那 37 列里的。
+    # 详情页跟列表页的区别就在这儿 —— 列表页一行一个工单，
+    # 详情页要把"这单经历过什么"一起端出来，不然前端得再发两次请求。
+    #
+    # 都不分页。理由不是"以后再说"，是这两张子表的行数天生就小：
+    # 状态机一共 6 个状态、6 条合法流转，一单再怎么折腾也就几行；
+    # 处理记录是人手写的备注，量级也就个位数到几十。
+    # 真出现某张单被写了三千条备注，那时候再加 limit 不迟 ——
+    # 而现在给一个连现实里都撞不到的 offset/limit 参数，只是多两个没人用的字段。
+    #
+    # 注意 from_status 可空是正常的（建单那条），别当数据缺失，
+    # 理由写在 WorkOrderStatusHistoryItem 的注释里了。
+    #
+    # 这两个字段没有默认值，也就是"谁构造 WorkOrderDetail 谁就得把子表填上"。
+    # 故意这样的：给个默认 [] 的话，写接口那几条路径会返回一个空数组，
+    # 前端分不出"这单真没记录"和"后端这次没查" —— 那才是真的坑。
+    # 代价是每个返回详情的写接口都得多查两张小表，值。
+    status_history: list[WorkOrderStatusHistoryItem]
+    processing_records: list[WorkOrderRecordItem]
 
 
 class WorkOrderCreateRequest(BaseModel):
@@ -172,23 +239,3 @@ class WorkOrderRecordRequest(BaseModel):
     # 或者那些内容本来就该放到别的地方（工单描述、附件）。
     # 给个上限还有个好处：挡住"前端把整个日志文件糊进来"这种事
     content: str = Field(min_length=1, max_length=2000)
-
-
-class WorkOrderRecordItem(BaseModel):
-    """一条处理记录长什么样。
-
-    这是全项目第一个"子资源"的返回体 —— 前面几个接口都是返回工单本身，
-    这个不是。为什么单独给一个：加完备注之后，前端最需要的是
-    "我这条加上了，长这样"，好直接往列表末尾追加一条；
-    为了看清楚自己刚写的几个字再拉一次工单详情，纯属浪费。
-
-    没带用户名。要带就得 JOIN 一次 users，而前端本来就有用户表、
-    拿着 user_id 自己查得到。等真有页面需要"张三 5 分钟前说"这种展示，
-    再考虑是后端 JOIN 还是前端查。
-    """
-
-    id: int
-    work_order_id: int
-    user_id: int | None
-    content: str
-    created_at: datetime

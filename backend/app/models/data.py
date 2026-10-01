@@ -238,7 +238,19 @@ class WorkOrderStatusHistory(Base):
     )
 
     work_order: Mapped[WorkOrder] = relationship(back_populates="status_history")
-    operator: Mapped["User | None"] = relationship(lazy="joined")
+    # operator 原来是 lazy="joined"（查流水就顺带 JOIN 出 users），2026-10-01 去掉了。
+    #
+    # 理由不是"它慢"，而是"它没用"：全仓库 grep 过 .operator 和 .user，
+    # app/ 里一个调用者都没有 —— 我们发给前端的只有 operator_id，
+    # 而那个值本来就在这张表上，压根不需要 JOIN users。
+    #
+    # 这儿没有实测数字，是因为量不出来：这两张表在我们库里最多也就几行，
+    # 一次 JOIN 的耗时全淹没在毫秒级噪声里。数据量上来之后才谈得上算账，
+    # 但"没有调用者"这件事现在就能确定 —— 不必等到能测再改。
+    #
+    # 去掉之后就是默认的按需加载：真有人要读流水上的 operator.username，
+    # 那一刻多查一条就是。谁用谁付钱，别让每个查流水的都替它买单。
+    operator: Mapped["User | None"] = relationship()
 
 
 class WorkOrderProcessingRecord(Base):
@@ -268,7 +280,9 @@ class WorkOrderProcessingRecord(Base):
     )
 
     work_order: Mapped[WorkOrder] = relationship(back_populates="processing_records")
-    user: Mapped["User | None"] = relationship(lazy="joined")
+    # 同上：原来是 lazy="joined"，2026-10-01 一起去掉的，
+    # 理由和那段注释一样（没有调用者 + 发给前端的只有本表上的 user_id）
+    user: Mapped["User | None"] = relationship()
 
 
 class WorkOrderLabor(TimestampMixin, Base):

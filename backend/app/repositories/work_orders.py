@@ -41,6 +41,37 @@ class WorkOrderRepository:
         statement = select(WorkOrder).where(WorkOrder.id == work_order_id)
         return self.db.execute(statement).scalar_one_or_none()
 
+    def list_status_history(self, work_order_id: int) -> list[WorkOrderStatusHistory]:
+        """查一张单的流转流水，按 id 正序 —— 也就是这单一路走过来的顺序。
+
+        为什么不分页：一张单的流水在业务上就多不了。建单 1 条，
+        之后每流转一次加 1 条，走到 CLOSED 也就 5 条。
+        哪天真有人把一张单折腾出几百条，那件事本身就该去查清楚，
+        而不是先给它套个分页把问题盖住。
+
+        排序用 id 而不是 created_at：created_at 只精确到秒，
+        同一秒里连着做两个动作（脚本批处理很容易这样）顺序就乱了 ——
+        而"谁先谁后"恰恰是流水唯一要表达的东西。
+        架构文档里那句"默认排序使用稳定字段"，说的就是这种事。
+        """
+        statement = (
+            select(WorkOrderStatusHistory)
+            .where(WorkOrderStatusHistory.work_order_id == work_order_id)
+            .order_by(WorkOrderStatusHistory.id)
+        )
+        return list(self.db.execute(statement).scalars().all())
+
+    def list_processing_records(
+        self, work_order_id: int
+    ) -> list[WorkOrderProcessingRecord]:
+        """查一张单的处理记录，同样按 id 正序。分页和排序的理由跟上面一样。"""
+        statement = (
+            select(WorkOrderProcessingRecord)
+            .where(WorkOrderProcessingRecord.work_order_id == work_order_id)
+            .order_by(WorkOrderProcessingRecord.id)
+        )
+        return list(self.db.execute(statement).scalars().all())
+
     # 这里原来有个 count_work_orders()，是全项目最贵的单条查询，2026-09-29 删了。
     # 它当时量出来的数（keep 在这儿，因为这是"为什么删它"的证据）：
     #

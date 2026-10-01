@@ -27,6 +27,7 @@ from app.schemas.work_orders import (
     WorkOrderCreateRequest,
     WorkOrderDetail,
     WorkOrderRecordItem,
+    WorkOrderStatusHistoryItem,
     WorkOrderSummary,
 )
 
@@ -51,14 +52,56 @@ def work_order_summary(work_order: WorkOrder) -> WorkOrderSummary:
     )
 
 
-def work_order_detail(work_order: WorkOrder) -> WorkOrderDetail:
-    """把一条 WorkOrder 搬成 WorkOrderDetail。
+def status_history_item(row: WorkOrderStatusHistory) -> WorkOrderStatusHistoryItem:
+    """把一条流水搬成 WorkOrderStatusHistoryItem。
+
+    这个名字跟模型字段几乎一样，看着像废话。但这儿有一处是真在干活的：
+    reason 那一列只有驳回才有值，别的动作存的是 NULL，
+    搬的时候原样带出去就行，不用在 service 里判动作 ——
+    数据是怎么存的，就怎么给前端，中间不加判断反而少一个出错的地方。
+    """
+    return WorkOrderStatusHistoryItem(
+        id=row.id,
+        from_status=row.from_status,
+        to_status=row.to_status,
+        operator_id=row.operator_id,
+        reason=row.reason,
+        created_at=row.created_at,
+    )
+
+
+def processing_record_item(row: WorkOrderProcessingRecord) -> WorkOrderRecordItem:
+    """把一条处理记录搬成 WorkOrderRecordItem。
+
+    "加备注"那个接口也用它，所以这条搬运动作只有一个落点 ——
+    详情页里的记录和刚加完返回的那条，从同一个函数出去，形状不可能不一样。
+    """
+    return WorkOrderRecordItem(
+        id=row.id,
+        work_order_id=row.work_order_id,
+        user_id=row.user_id,
+        content=row.content,
+        created_at=row.created_at,
+    )
+
+
+def work_order_detail(
+    work_order: WorkOrder,
+    *,
+    status_history: list[WorkOrderStatusHistory],
+    processing_records: list[WorkOrderProcessingRecord],
+) -> WorkOrderDetail:
+    """把一条 WorkOrder 连它两张子表一起搬成 WorkOrderDetail。
 
     这已经是第三个这种搬运函数了（asset_summary / asset_detail / 这个）。
     三份长得几乎一样的东西摆在这儿，说好听点叫"每个视图互不干扰"，
     说难听点就是啰嗦。暂时不动 —— 真要收拾，应该是等第 19、20 步都做完，
     看看总共有几个视图，再决定是抽个基类还是干脆别抽。
     现在三个还看不出规律，提前抽反而抽错。
+
+    子表用关键字参数传进来，不在这个函数里自己查：它是个纯函数，
+    手里没有 db，也拿不到仓储。查库是 service 的事，搬字段是这儿的事，
+    两边分开之后这个函数谁都能调、也能单测。
     """
     return WorkOrderDetail(
         id=work_order.id,
@@ -87,6 +130,8 @@ def work_order_detail(work_order: WorkOrder) -> WorkOrderDetail:
         sla_source=work_order.sla_source,
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
+        status_history=[status_history_item(row) for row in status_history],
+        processing_records=[processing_record_item(row) for row in processing_records],
     )
 
 
@@ -159,25 +204,37 @@ class WorkOrderService:
             has_more=has_more,
         )
 
+    def _detail(self, work_order: WorkOrder) -> WorkOrderDetail:
+        """工单本身 + 两张子表，一起搬成详情。
+
+        为什么要一个私有方法而不是每处都写两行查询：详情这个形状一共四处要返回
+        （查详情、建单、分派、流转），漏掉哪一处，前端就会在某条路径上
+        收到一个空数组 —— 那种 bug 平时看不出来，只在"点了开始之后历史列表空了"
+        这种地方冒头，最难查。摆成一个方法，就没得漏。
+        """
+        return work_order_detail(
+            work_order,
+            status_history=self.work_orders.list_status_history(work_order.id),
+            processing_records=self.work_orders.list_processing_records(work_order.id),
+        )
+
     def get_work_order(self, work_order_id: int) -> WorkOrderDetail:
         """查单条，查不到就 404。
 
-        这里比 assets 那边多啰嗦一句：工单是有状态流转的东西，
-        按理说详情页该把流转记录（work_order_status_history）和
-        处理记录（work_order_processing_records）一起带出来。
+        这儿比 assets 那边多带了两张子表：流转记录和备注。
 
-        现在还是没带。原来不带的理由是"那两张表实测都是 0 行 —— 官方导入的数据里
-        一条流转记录都没有，给一个永远是空的数组留个字段位没意义"。
-        这个理由现在已经不成立了：从 18b 起建单就会写流水，18e 之后还能一直往里加备注。
+        原来是不带的，理由是"那两张表实测都是 0 行，给一个永远是空的数组没意义"。
+        理由已经不成立了（18b 起建单就写流水，18e 之后还能一直加备注），
+        所以这一步补上了。
 
-        没顺手补上的原因是那是另一件事，不是一个体量的活：
-        读两张子表要挑字段、要防 N+1、还得决定要不要分页。
-        留到做详情页那块的时候一起弄，那时候连前端要什么形状都清楚了。
+        没分页，不是"以后再说"。这两张子表的行数天生就小：状态机一共 6 个状态、
+        6 条合法流转，一单再怎么折腾也就几行；备注是人手写的，量级也就个位数。
+        真有一张单被写了三千条备注，那时候再加 limit 不迟。
         """
         work_order = self.work_orders.get_by_id(work_order_id)
         if work_order is None:
             raise NotFoundException(f"Work order {work_order_id} not found.")
-        return work_order_detail(work_order)
+        return self._detail(work_order)
 
     def create_work_order(
         self,
@@ -271,7 +328,7 @@ class WorkOrderService:
         # created_at / updated_at 是数据库 server_default 生成的，
         # 提交之后 ORM 里那份还是旧的，刷一下再搬给 schema
         self.db.refresh(work_order)
-        return work_order_detail(work_order)
+        return self._detail(work_order)
 
     def assign_work_order(
         self,
@@ -370,7 +427,7 @@ class WorkOrderService:
         # 少任何一样这单都说不清楚 —— 状态变了却没流水，就是"它凭空跳过了一步"
         self.db.commit()
         self.db.refresh(work_order)
-        return work_order_detail(work_order)
+        return self._detail(work_order)
 
     def _transition(
         self,
@@ -495,8 +552,8 @@ class WorkOrderService:
             )
 
         # UPDATE 是绕过 ORM 发的（synchronize_session=False），session 里那份对象
-        # 还停在旧状态。下面的流水要用 work_order.id，最后 work_order_detail
-        # 还要读它一堆列，所以先刷新一次，别让后面的人拿到过期数据
+        # 还停在旧状态。下面写流水要用 work_order.id，最后 _detail 还要读它一堆列，
+        # 所以先刷新一次，别让后面的人拿到过期数据
         self.db.refresh(work_order)
 
         # 流水里存 reason（驳回原因）。别的动作没这个值，就存 NULL。
@@ -530,7 +587,7 @@ class WorkOrderService:
         # 跟前面几个接口一样，改数据 + 流水 + 日志一次性提交，不留半截
         self.db.commit()
         self.db.refresh(work_order)
-        return work_order_detail(work_order)
+        return self._detail(work_order)
 
     # ---------------------------------------------------------------
     # 下面四个是外面真正调的接口，各自只负责"传哪个动作进去"。
@@ -686,10 +743,4 @@ class WorkOrderService:
 
         # created_at 是数据库 server_default 生成的，提交之后 ORM 里那份还是旧的
         self.db.refresh(record)
-        return WorkOrderRecordItem(
-            id=record.id,
-            work_order_id=record.work_order_id,
-            user_id=record.user_id,
-            content=record.content,
-            created_at=record.created_at,
-        )
+        return processing_record_item(record)

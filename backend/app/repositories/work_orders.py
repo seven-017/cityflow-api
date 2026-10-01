@@ -1,7 +1,7 @@
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.models import WorkOrder, WorkOrderStatusHistory
+from app.models import WorkOrder, WorkOrderProcessingRecord, WorkOrderStatusHistory
 
 
 class WorkOrderRepository:
@@ -69,6 +69,16 @@ class WorkOrderRepository:
     def add_status_history(self, history: WorkOrderStatusHistory) -> None:
         """插一条状态流水。同样不 commit，理由见上面。"""
         self.db.add(history)
+
+    def add_processing_record(self, record: WorkOrderProcessingRecord) -> None:
+        """插一条处理记录。同样只 add 不 commit，理由见上面。
+
+        这个跟 add_status_history 是两码事，别看名字像就合并：
+        流水的每一行对应一次状态变化（所以有 from_status / to_status），
+        处理记录是人随手写的备注（没有状态，只有一个 content）。
+        合成一张表的话，就会有一半的列永远是 NULL。
+        """
+        self.db.add(record)
 
     def apply_transition(
         self,

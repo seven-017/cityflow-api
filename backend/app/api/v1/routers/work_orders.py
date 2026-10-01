@@ -11,6 +11,8 @@ from app.schemas.work_orders import (
     WorkOrderAssignRequest,
     WorkOrderCreateRequest,
     WorkOrderDetail,
+    WorkOrderRecordItem,
+    WorkOrderRecordRequest,
     WorkOrderRejectRequest,
     WorkOrderSummary,
 )
@@ -207,3 +209,33 @@ def reject_work_order(
         ip_address=ip_address,
     )
     return ApiResponse(data=updated)
+
+
+@router.post(
+    "/{work_order_id}/records",
+    response_model=ApiResponse[WorkOrderRecordItem],
+    # 201：这是往工单底下新建了一个子资源，跟建工单本身一个道理。
+    # 四五十行上面那几个流转接口返的是 200 —— 它们改的是已有资源的属性，没新建东西
+    status_code=status.HTTP_201_CREATED,
+)
+def add_work_order_record(
+    work_order_id: int,
+    payload: WorkOrderRecordRequest,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    # 权限还是 work_order:update：能改这张单的人就能在它底下写备注。
+    # 没为"写备注"单开一个权限点，理由跟驳回那儿一样（见上面那段注释）
+    operator: Annotated[
+        User,
+        Depends(require_permissions(PermissionCode.WORK_ORDER_UPDATE)),
+    ],
+) -> ApiResponse[WorkOrderRecordItem]:
+    ip_address = request.client.host if request.client else None
+    created = WorkOrderService(db).add_processing_record(
+        work_order_id=work_order_id,
+        content=payload.content,
+        operator=operator,
+        request_path=request.url.path,
+        ip_address=ip_address,
+    )
+    return ApiResponse(data=created)

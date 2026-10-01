@@ -15,7 +15,7 @@ from app.core.work_order_status import (
     WorkOrderStatus,
     resolve_transition,
 )
-from app.models import User, WorkOrder, WorkOrderStatusHistory
+from app.models import User, WorkOrder, WorkOrderProcessingRecord, WorkOrderStatusHistory
 from app.repositories.operation_logs import OperationLogRepository
 from app.repositories.users import UserRepository
 from app.repositories.work_orders import WorkOrderRepository
@@ -24,6 +24,7 @@ from app.schemas.work_orders import (
     WorkOrderAssignRequest,
     WorkOrderCreateRequest,
     WorkOrderDetail,
+    WorkOrderRecordItem,
     WorkOrderSummary,
 )
 
@@ -146,10 +147,13 @@ class WorkOrderService:
         按理说详情页该把流转记录（work_order_status_history）和
         处理记录（work_order_processing_records）一起带出来。
 
-        现在没带，原因是那两张表实测都是 0 行 —— 官方导入的数据里
-        一条流转记录都没有（那是平台自己流转时才写的）。
-        给一个永远是空的数组留个字段位，没意义。
-        第 18 步做完状态机，这两张表才有数据，到那时候再加。
+        现在还是没带。原来不带的理由是"那两张表实测都是 0 行 —— 官方导入的数据里
+        一条流转记录都没有，给一个永远是空的数组留个字段位没意义"。
+        这个理由现在已经不成立了：从 18b 起建单就会写流水，18e 之后还能一直往里加备注。
+
+        没顺手补上的原因是那是另一件事，不是一个体量的活：
+        读两张子表要挑字段、要防 N+1、还得决定要不要分页。
+        留到做详情页那块的时候一起弄，那时候连前端要什么形状都清楚了。
         """
         work_order = self.work_orders.get_by_id(work_order_id)
         if work_order is None:
@@ -554,4 +558,77 @@ class WorkOrderService:
             request_path=request_path,
             ip_address=ip_address,
             reason=reason,
+        )
+
+    def add_processing_record(
+        self,
+        *,
+        work_order_id: int,
+        content: str,
+        operator: User,
+        request_path: str,
+        ip_address: str | None,
+    ) -> WorkOrderRecordItem:
+        """在工单下面留一条处理记录，说白了就是写句备注。
+
+        两道闸门：单子得在，而且得是平台自己的单。跟前面几个写操作一个口径 ——
+        "双数据源隔离"这条线是所有写操作的入口检查，不在这儿破例。
+
+        刻意没做的是三件事，都不是漏了：
+
+        1. 没判状态。处理记录不是流转，它不改状态。已经关闭的单再写一条
+           "客户又打电话来问"，这是合理的；拿状态卡它，只会让人在真需要的时候
+           反倒记不下来。
+        2. 没写状态流水。流水记的是"状态怎么变的"，这条备注没让状态动。
+           往里塞一行 from_status 和 to_status 一样的，那才是把那张表搞脏了。
+        3. 没动 work_orders 那一行，所以 updated_at 不会因为写备注而变。
+           这是对的：备注不是对工单本身的修改。哪天要拿 updated_at 排序
+           "最近有动静的单"，得想清楚要不要算上备注 —— 到时候再说。
+        """
+        work_order = self.work_orders.get_by_id(work_order_id)
+        if work_order is None:
+            raise NotFoundException(f"Work order {work_order_id} not found.")
+
+        if work_order.data_source != DATA_SOURCE_PLATFORM:
+            raise PermissionDeniedException(
+                f"Work order {work_order_id} is imported public data, "
+                f"cannot add records."
+            )
+
+        record = WorkOrderProcessingRecord(
+            work_order_id=work_order.id,
+            user_id=operator.id,
+            content=content,
+        )
+        self.work_orders.add_processing_record(record)
+
+        # flush 一下自增主键才拿得到 —— 下面那条操作日志要拿它写清"加的是哪一条"
+        self.db.flush()
+
+        self.logs.add(
+            user_id=operator.id,
+            operation="ADD_WORK_ORDER_RECORD",
+            module="work_order",
+            target_type="work_order",
+            target_id=str(work_order.id),
+            request_method="POST",
+            request_path=request_path,
+            result="SUCCESS",
+            # 日志的 detail 写的是"加了哪一条"，不是状态。备注的内容不往这儿抄 ——
+            # 想看成什么内容直接查记录表，抄一份到日志里早晚两边不一致
+            detail=f"record_id={record.id}",
+            ip_address=ip_address,
+        )
+
+        # 记录 + 日志一起提交，跟前面几个写接口一个规矩
+        self.db.commit()
+
+        # created_at 是数据库 server_default 生成的，提交之后 ORM 里那份还是旧的
+        self.db.refresh(record)
+        return WorkOrderRecordItem(
+            id=record.id,
+            work_order_id=record.work_order_id,
+            user_id=record.user_id,
+            content=record.content,
+            created_at=record.created_at,
         )

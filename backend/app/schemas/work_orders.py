@@ -138,3 +138,33 @@ class WorkOrderRejectRequest(BaseModel):
     """
 
     reason: str = Field(min_length=1, max_length=500)
+
+
+class WorkOrderRecordRequest(BaseModel):
+    """在工单下面留一条处理记录，也就是一句备注。"""
+
+    # 2000 这个上限不是数据库的限制 —— 模型上那一列是 Text，能吃六万多字节。
+    # 是我们自己定的：一条备注写到两千字还没写完，多半是该拆成几条，
+    # 或者那些内容本来就该放到别的地方（工单描述、附件）。
+    # 给个上限还有个好处：挡住"前端把整个日志文件糊进来"这种事
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class WorkOrderRecordItem(BaseModel):
+    """一条处理记录长什么样。
+
+    这是全项目第一个"子资源"的返回体 —— 前面几个接口都是返回工单本身，
+    这个不是。为什么单独给一个：加完备注之后，前端最需要的是
+    "我这条加上了，长这样"，好直接往列表末尾追加一条；
+    为了看清楚自己刚写的几个字再拉一次工单详情，纯属浪费。
+
+    没带用户名。要带就得 JOIN 一次 users，而前端本来就有用户表、
+    拿着 user_id 自己查得到。等真有页面需要"张三 5 分钟前说"这种展示，
+    再考虑是后端 JOIN 还是前端查。
+    """
+
+    id: int
+    work_order_id: int
+    user_id: int | None
+    content: str
+    created_at: datetime

@@ -1,5 +1,5 @@
 import secrets
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,7 @@ from app.core.exceptions import (
     PermissionDeniedException,
 )
 from app.core.permissions import RoleCode
+from app.core.work_order_sla import SLA_SOURCE_PLATFORM, compute_sla_deadline
 from app.core.work_order_status import (
     ENGINEER_ALLOWED_ACTIONS,
     WorkOrderAction,
@@ -81,6 +82,9 @@ def work_order_detail(work_order: WorkOrder) -> WorkOrderDetail:
         duration=work_order.duration,
         job_type=work_order.job_type,
         source_update_count=work_order.source_update_count,
+        priority=work_order.priority,
+        sla_deadline=work_order.sla_deadline,
+        sla_source=work_order.sla_source,
         created_at=work_order.created_at,
         updated_at=work_order.updated_at,
     )
@@ -189,10 +193,19 @@ class WorkOrderService:
         后两样少写一个，工单就成了"凭空出现"的 ——
         详情页上说不清它怎么来的，审计也查不到是谁录的。
 
-        另外这一版故意没做 sla_deadline（优先级对应的处理时限）。
-        它是纯计算，跟状态机没关系，塞在这儿只会让这个方法变胖。
-        等那几条流转都做完，再单独收拾它。
+        另外顺手把 SLA 也算出来（优先级 -> 目标完成时间）。这个不算"多做了一步"：
+        deadline 是从"建单那一刻"往后加的，只有在这儿才拿得到那个时刻 ——
+        放到别处（比如做成定时任务去补）反而得费劲地问"这张单是什么时候建的"。
+
+        注意 sla_deadline 这一列官方导入的单全是 NULL，我们也不去补它们 ——
+        文档里说过，不给历史数据伪造 SLA。
         """
+        # deadline 是从"建单这一刻"往后加的，所以这个时刻得在这儿取。
+        # 用 Python 的本地时间，跟库里 created_at 那个 func.now() 是同一个基准
+        # （都跑在这台机器上）；将来要是应用和数据库拆到两台机器、时区还不一样，
+        # 这儿就得改成拿数据库的时间来算
+        started_at = datetime.now()
+
         work_order = WorkOrder(
             source_record_id=generate_source_record_id(),
             # 双数据源隔离的落点。官方导入的那些是 REAL_PUBLIC（只读，不许动），
@@ -211,6 +224,13 @@ class WorkOrderService:
             # 申请日期就是今天。官方数据里这一列有 15% 是空的，
             # 我们自己的单自己填，不跟着空
             request_date=date.today(),
+            # SLA 三件套。优先级是录单时选的；deadline 拿它算出来；
+            # source 标明这是平台自己算的，不是从哪份数据里抄来的 ——
+            # 这三个字段是配套的，只写前两个的话，将来分不清
+            # 一个 deadline 到底是平台算的，还是从别处导进来的
+            priority=payload.priority.value,
+            sla_deadline=compute_sla_deadline(payload.priority, started_at),
+            sla_source=SLA_SOURCE_PLATFORM,
             created_by_id=operator.id,
         )
         self.work_orders.add(work_order)

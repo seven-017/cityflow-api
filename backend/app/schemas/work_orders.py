@@ -2,6 +2,8 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
+from app.core.work_order_sla import WorkOrderPriority
+
 
 class WorkOrderSummary(BaseModel):
     """工单列表页里一行长什么样。
@@ -41,19 +43,25 @@ class WorkOrderSummary(BaseModel):
 class WorkOrderDetail(BaseModel):
     """工单详情页里那条工单长什么样。
 
-    比列表页多 14 个字段。跟 AssetDetail 一样，也是"挑"，不是全给 ——
-    WorkOrder 一共 37 列，这儿 22 列。
+    跟 AssetDetail 一样，字段是"挑"出来的，不是把 WorkOrder 那 37 列抄一遍。
 
-    砍掉的那批基本是"整列都是空的"（都是 100% NULL，实测）：
-        priority / sla_policy / sla_deadline / sla_source
-        is_ppm / is_safety / is_reopened / has_warranty
-        created_by_id / assigned_to_id
+    挑选依据是各列的 NULL 占比（实测），所以这张名单会来回变 ——
+    砍掉一个字段的依据是"这一列到底有没有值"，**依据变了就得跟着改**。
+    已经来回变过两次了，都记在这儿，免得后来的人看着纳闷：
 
-    priority 这个砍得最值得说：它 100% 是 NULL，而且不同值个数是 0。
-    意思是这一列官方数据压根没给过。优先级本来是工单系统很重要的一个字段，
-    但它得等平台自己录数据才会有值 —— 那是第 18 步之后的事。
+        priority / sla_deadline / sla_source    砍过，又加回来
+            当初砍的理由是"官方数据里 100% 是 NULL，给了也是一片空白"。
+            现在平台自己建的工单会填这三列（录单时选优先级、建单时算 deadline），
+            它们有真实含义了。官方那两百万单仍然是 NULL，详情页显示成空就好。
 
-    另外砍了两个：route（95% 空）、parent_source_record_id（96.6% 空）。
+        assigned_to_id                          砍过，又加回来
+            理由同上 —— 分派做完之后它才有值。
+
+    仍然砍掉的（都是 100% NULL，官方数据压根没给过）：
+        sla_policy / is_ppm / is_safety / is_reopened / has_warranty / created_by_id
+        （sla_policy 是我们自己决定不填的，理由写在 core/work_order_sla.py 里）
+
+    另外砍了两个空得没那么彻底的：route（95% 空）、parent_source_record_id（96.6% 空）。
     source_updated_raw 也砍了，那是导入时留下的原样字符串，给人看不合适。
     """
 
@@ -85,6 +93,13 @@ class WorkOrderDetail(BaseModel):
     duration: str | None
     job_type: str | None
     source_update_count: int | None
+    # 下面这三个是一组，只有平台自己建的工单才有值（官方那批全是 NULL，
+    # 文档说过不给历史数据伪造 SLA）。
+    # priority 是录单时选的，sla_deadline 是建单那一刻按优先级算出来的，
+    # sla_source 记这个 SLA 是谁给的 —— 平台算的一律是 PLATFORM_RULE
+    priority: str | None
+    sla_deadline: datetime | None
+    sla_source: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -111,6 +126,15 @@ class WorkOrderCreateRequest(BaseModel):
     # 而这列在模型上本来就可空，没必要为了好看多搭一次查询
     asset_source_record_id: str | None = Field(default=None, max_length=100)
     scheduled_end_date: date | None = None
+    # 优先级。不填就按 P4 算 —— P4 是最不急的那一档，
+    # 录单的人没评估过，就让这张单排到最后去，总比让它去挤急单的位置强。
+    #
+    # 另一种做法是"没填就不算 SLA"（priority 和 sla_deadline 都留空），
+    # 但那样列表页和详情页都得处理"有值/没值"两套显示，第一版不折腾这个。
+    #
+    # 类型用的是 StrEnum 而不是 str：Pydantic 会拿它做校验，
+    # 传个 P5 进来当场 422，不用等落到库里才发现有这么个优先级
+    priority: WorkOrderPriority = WorkOrderPriority.P4
 
 
 class WorkOrderAssignRequest(BaseModel):

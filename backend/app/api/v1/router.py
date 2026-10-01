@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1.routers import assets, auth, health, system, work_orders
+from app.api.v1.routers import assets, auth, health, labor, system, work_orders
 
 # 所有 v1 接口的总入口，新增一个模块就在这儿挂一行
 api_router = APIRouter()
@@ -13,3 +13,7 @@ api_router.include_router(assets.router, prefix="/assets", tags=["assets"])
 api_router.include_router(
     work_orders.router, prefix="/work-orders", tags=["work-orders"]
 )
+# labor 是工时（谁来干了多长时间、多少钱）。文档里路径就是 /labor，没有横线。
+# 这条线是从 AMPS 原始数据映射过来的，跟 assets 一样只有读接口 ——
+# 平台自己记工时的写接口（labor:create 那个权限点）还没做
+api_router.include_router(labor.router, prefix="/labor", tags=["labor"])

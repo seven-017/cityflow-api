@@ -4,6 +4,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy.orm import Session
 
+from app.core.cache import invalidate_dashboard_cache
 from app.core.data_sources import DataSource
 from app.core.exceptions import NotFoundException
 from app.models import User, WorkOrderLabor
@@ -243,6 +244,15 @@ class LaborService:
         # 异常冒上去之后 session 会被关掉，等于整批回滚 ——
         # 不会出现"工时建好了但日志没写"这种半截数据
         self.db.commit()
+
+        # 提交之后再清 Dashboard 缓存。
+        # 录一条工时，首页上"工时条数 / 合计小时 / 合计金额"那三张卡片就不准了，
+        # 不清的话最长要等 5 分钟（TTL）才变，用户会以为没记上。
+        #
+        # 顺序为什么是"先提交再清"，跟工单那边是同一个理由（窗口只影响一个请求
+        # vs 错的数在缓存里活到 TTL），完整论证写在 services/work_orders.py 的
+        # create_work_order 里，这边不重复
+        invalidate_dashboard_cache()
 
         # created_at / updated_at 是数据库 server_default 生成的，
         # 提交之后 ORM 手里那份还是旧的，刷一下再搬给 schema

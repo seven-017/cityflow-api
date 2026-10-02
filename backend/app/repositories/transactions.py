@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Transaction, TransactionDetail
@@ -35,6 +35,33 @@ class TransactionRepository:
         """
         statement = select(Transaction).where(Transaction.id == transaction_id)
         return self.db.execute(statement).scalar_one_or_none()
+
+    def count_transactions(self) -> int:
+        """数交易头有多少张单。
+
+        2026-10-02 实测：752746 张，COUNT 86.2 ms。
+        比 assets（17.7 ms）贵是因为表大五倍（75 万 vs 14.8 万），
+        跟数据本身有关，不是查询写歪了，不用动它。
+        """
+        return int(self.db.execute(select(func.count(Transaction.id))).scalar_one())
+
+    def count_transaction_details(self) -> int:
+        """数明细一共有多少行。
+
+        2026-10-02 实测：2290091 行，COUNT 1361 ms —— 是这套指标里第二贵的
+        （最贵的是 labor 那个合计 3257.5 ms）。
+
+        在"指标汇总"里放这个数，值不值当，说清楚免得以后有人来问：
+        它唯一的用处是让人看见明细这一层的量级（229 万行，是头的三倍）——
+        也就是"一张单平均三行多一点"这件事的数字来源。
+        真嫌它贵想砍掉的话，砍了就是 —— 它不像"未完结"那种数还有人拿去做决定，
+        它纯粹是个规模展示。留着的原因是这一整套指标算完一次要缓存的，
+        砍掉它只省掉 1361 / 5962 ≈ 23% 的冷启动时间，代价是首页少一块信息。
+        这个取舍是拍过脑袋的，不是漏想的。
+        """
+        return int(
+            self.db.execute(select(func.count(TransactionDetail.id))).scalar_one()
+        )
 
     def list_transactions(
         self,

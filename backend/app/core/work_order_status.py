@@ -113,3 +113,37 @@ def is_terminal(status: WorkOrderStatus) -> bool:
     因为「完成」这两个字听起来就像结束了，实际上它还能再关一次。
     """
     return not ALLOWED_TRANSITIONS.get(status, set())
+
+
+# 「活干完了没有」的三个桶。Dashboard 的指标汇总就按这三个桶报数。
+#
+# 先说清楚一件事：这个分组文档里没有。business-rules.md 只给了
+# 「源状态 -> 标准化状态」那张映射表，从头到尾没提过哪些状态算"未完结"。
+# 所以这三个桶是我们自己切的 —— 但切法有依据，依据就是上面那份状态机：
+#
+#     主干：PENDING -> ASSIGNED -> IN_PROGRESS -> COMPLETED -> CLOSED
+#     岔路：PENDING / ASSIGNED -> REJECTED（到这儿就断了，哪儿也去不了）
+#
+# 一刀切在 COMPLETED 上：主干左半边算未完结，右半边算已完成。
+# REJECTED 是条死胡同，既不是"还在干"也不是"干完了"，单独占一个桶。
+#
+# 为什么非得给 REJECTED 留个桶：不留的话三个数（总数 / 未完结 / 已完成）
+# 对不上账 —— 差的那批（实测库里 REJECTED 占 5.84%，129662 行）
+# 没地方交代，看的人只会以为数字算错了。
+# 三个桶互不重叠、合起来正好是全部六个状态，所以
+# 「总数 = 未完结 + 已完成 + 已退回」这条等式恒成立。
+# 验收脚本里拿它当断言：将来谁加了第七个状态忘了归类，那条断言当场红。
+#
+# 别跟 is_terminal 混。那个问的是「还能不能往下走」（COMPLETED 还能 CLOSED，
+# 所以它不算走到头）；这儿问的是「活干完了没有」（COMPLETED 就算干完了）。
+# 两个问题不一样，答案自然不一样，别把其中一个当成另一个的同义词。
+UNFINISHED_STATUSES: tuple[str, ...] = (
+    WorkOrderStatus.PENDING.value,
+    WorkOrderStatus.ASSIGNED.value,
+    WorkOrderStatus.IN_PROGRESS.value,
+)
+FINISHED_STATUSES: tuple[str, ...] = (
+    WorkOrderStatus.COMPLETED.value,
+    WorkOrderStatus.CLOSED.value,
+)
+REJECTED_STATUSES: tuple[str, ...] = (WorkOrderStatus.REJECTED.value,)

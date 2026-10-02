@@ -3,6 +3,7 @@ from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
+from app.core.cache import invalidate_dashboard_cache
 from app.core.data_sources import DataSource
 from app.core.exceptions import (
     BusinessException,
@@ -324,6 +325,19 @@ class WorkOrderService:
         # 不会出现"工单建好了但流水没写"这种半截数据
         self.db.commit()
 
+        # 提交之后再清 Dashboard 的缓存。顺序不能反，这不是风格问题：
+        #
+        #   要是先清再提交：清完到提交之间进来一个请求，它去查库（还看不到我们这笔
+        #   没提交的改动）算出一份旧数据存进缓存，然后我们才提交 ——
+        #   结果是缓存里那批旧数能活整整 5 分钟。
+        #   先提交再清的话：最坏情况是"提交那一瞬间有个请求正好读到了旧缓存"，
+        #   它自己拿一次旧数就完了，缓存紧接着就被清掉。
+        #
+        # 两种顺序都躲不掉窗口，但后者的窗口只影响一个已经跑起来的请求，
+        # 前者会让错的数在缓存里待到 TTL。所以这个文件里所有写操作一律"先提交再清"。
+        # 这个函数是第一个写的，后面三个写接口就照这个来，理由不重复了。
+        invalidate_dashboard_cache()
+
         # created_at / updated_at 是数据库 server_default 生成的，
         # 提交之后 ORM 里那份还是旧的，刷一下再搬给 schema
         self.db.refresh(work_order)
@@ -425,6 +439,8 @@ class WorkOrderService:
         # 四件事一起提交：改状态、写派单人、落流水、落日志。
         # 少任何一样这单都说不清楚 —— 状态变了却没流水，就是"它凭空跳过了一步"
         self.db.commit()
+        # 提交之后再清 Dashboard 缓存，顺序的理由写在 create_work_order 里
+        invalidate_dashboard_cache()
         self.db.refresh(work_order)
         return self._detail(work_order)
 
@@ -585,6 +601,10 @@ class WorkOrderService:
 
         # 跟前面几个接口一样，改数据 + 流水 + 日志一次性提交，不留半截
         self.db.commit()
+        # 状态变了，Dashboard 上"未完结 / 已完成"那两张卡片就旧了 —— 清掉。
+        # 顺带说一句：start / complete / close / reject 四个接口都走这个 _transition，
+        # 所以四个动作只需要在这儿清一次，不用在每个动作里各写一遍
+        invalidate_dashboard_cache()
         self.db.refresh(work_order)
         return self._detail(work_order)
 
@@ -739,6 +759,14 @@ class WorkOrderService:
 
         # 记录 + 日志一起提交，跟前面几个写接口一个规矩
         self.db.commit()
+
+        # 加处理记录也清一遍缓存。
+        # 严格说它不影响现在这十个指标 —— 那些数只数工单 / 工时 / 资产 / 交易的行数，
+        # 处理记录那张表不在里面。但"哪些东西会进 Dashboard"是会变的
+        # （20b 那九个图表里，"最近工单"很可能就跟这张表有关），
+        # 而多清一次的代价是一个 dict.clear()，漏清一次的代价是
+        # "我明明加了记录，首页却没变"。两个代价不对等，挑便宜的那个。
+        invalidate_dashboard_cache()
 
         # created_at 是数据库 server_default 生成的，提交之后 ORM 里那份还是旧的
         self.db.refresh(record)

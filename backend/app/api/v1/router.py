@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from app.api.v1.routers import (
     assets,
     auth,
+    dashboard,
     health,
     labor,
     system,
@@ -31,3 +32,8 @@ api_router.include_router(labor.router, prefix="/labor", tags=["labor"])
 api_router.include_router(
     transactions.router, prefix="/transactions", tags=["transactions"]
 )
+# dashboard 是首页那一页的聚合。跟前面几个不一样的地方：它不翻页、不带过滤，
+# 一次把整页要的数都算出来。也是整个项目唯一走缓存的读接口 ——
+# 冷启动 5.96 秒，缓存命中之后不碰数据库。为什么是进程内缓存不是 Redis，
+# 看 core/cache.py 里那一整段
+api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])

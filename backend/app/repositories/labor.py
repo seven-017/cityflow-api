@@ -1,7 +1,23 @@
-from sqlalchemy import select
+from decimal import Decimal
+from typing import NamedTuple
+
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import WorkOrderLabor
+
+
+class LaborTotals(NamedTuple):
+    """工时表一次性查回来的三个数：条数、合计小时、合计金额。
+
+    跟工单那边的 WorkOrderStatusCounts 一个道理用 NamedTuple：
+    三个数里前一个是 int、后两个是可空的 Decimal，虽然类型不完全一样，
+    但"合计小时"和"合计金额"这两兄弟长得太像了，光是拆包位置错一位就容易搞反。
+    """
+
+    record_count: int
+    total_hours: Decimal | None
+    total_cost: Decimal | None
 
 
 class LaborRepository:
@@ -76,6 +92,41 @@ class LaborRepository:
         # 多出来的那一条由 service 裁掉，不会发到前端。
         statement = statement.order_by(WorkOrderLabor.id).limit(limit + 1)
         return list(self.db.execute(statement).scalars().all())
+
+    def totals(self) -> LaborTotals:
+        """一次查出工时条数、合计小时、合计金额。
+
+        三个数一条 SQL 搞定，不分成三条 —— 跟工单那边同一个道理（那边有对照实验，
+        991.9 ms vs 1329.9 ms），这里不再重复量一遍：扫一次表拿三个数，
+        永远比扫三次各拿一个数便宜，何况这张表 320 万行。
+
+        2026-10-02 实测：3202020 条，一条聚合 3257.5 ms。
+        这是整套 Dashboard 指标里最贵的一个 —— 比第二贵的（交易明细 1361 ms）
+        还贵一倍多。缓存值不值得做，分母主要就是它贡献的。
+
+        两个 SUM 都允许是 None。空表上 SUM 返回 NULL，不是 0。
+        这儿不把它改成 0 是故意的：这张表要是真的一条都没有，
+        "合计 0 小时"读起来像"确实有人干活但没花时间"，
+        跟"一条记录都没有"是两回事。business-rules.md 里那句
+        「空值不伪造」说的就是这个 —— 宁可让前端显示一个破折号。
+
+        另外记一笔数据现状：hours 和 cost 列一行 NULL 都没有（3202020 行全满），
+        但有负数 —— hours < 0 的 73861 行、cost < 0 的 70642 行。
+        那是导入进来的原始数据自带的（冲正、退回之类的记录），不清洗、不过滤，
+        合计就按原样算。要按"正数才算工时"来合计，那是个业务决定，
+        不是这里能自己拍的事。
+        """
+        statement = select(
+            func.count(WorkOrderLabor.id),
+            func.sum(WorkOrderLabor.hours),
+            func.sum(WorkOrderLabor.cost),
+        )
+        record_count, total_hours, total_cost = self.db.execute(statement).one()
+        return LaborTotals(
+            record_count=int(record_count or 0),
+            total_hours=total_hours,
+            total_cost=total_cost,
+        )
 
     def add(self, labor: WorkOrderLabor) -> WorkOrderLabor:
         """插一条工时。

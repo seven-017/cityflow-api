@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Asset
@@ -58,3 +58,26 @@ class AssetRepository:
     # 因为分页元数据里的 total 一起删了（原因写在 schemas/common.py 的 CursorMeta 上），
     # 没人调它了 —— 没调用者的方法就是死代码。
     # 留个空行在这儿，省得以后有人翻 git blame 时一头雾水。
+    #
+    # 2026-10-02 又加回来了，理由写在下面这个方法的注释里。
+    # 那段"删了"的记录没删掉，是有意的 —— 同一段代码该不该留，取决于当时有没有人用，
+    # 两次的答案不一样很正常，把两次的判断都留着比抹掉一次更清楚。
+
+    def count_assets(self) -> int:
+        """数资产有多少条。
+
+        它是"删了又加回来"的，所以先说清楚为什么当年删、现在为什么又要：
+
+        当年（2026-09-29）它唯一的调用者是分页元数据里那个 total，
+        而那个 total 本身被删了（320 万行上算一次 COUNT 是纯浪费，
+        理由写在 schemas/common.py 的 CursorMeta 上）。调用者没了，它就成死代码了。
+
+        现在（2026-10-02）加回来，因为 Dashboard 的指标汇总要报这个数 ——
+        身份从"分页里一个没人看的装饰"变成了"首页上的一张卡片"。
+        所以「没用到的不许先写」这条规矩反过来说也成立：
+        没用到的不许留，但真用到的时候，也不该因为"以前删过"就不敢加。
+
+        2026-10-02 实测：assets 148423 行，COUNT 17.7 ms。
+        这是整套 Dashboard 指标里最便宜的一个，不用为它做任何优化。
+        """
+        return int(self.db.execute(select(func.count(Asset.id))).scalar_one())

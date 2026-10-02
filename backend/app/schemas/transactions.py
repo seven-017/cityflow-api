@@ -55,6 +55,67 @@ class TransactionLineItem(BaseModel):
     part_uom: str | None
 
 
+class TransactionSummary(BaseModel):
+    """交易列表里一行长什么样。
+
+    跟 LaborSummary 一样是张白名单：没写在这儿的字段前端拿不到。
+    13 个字段，不是一个不多不少抄 transactions 的 17 列，是挑的。
+
+    挑的判据跟 labor 那次一样（NULL 占比 + 区分度），但有两点不一样，写清楚：
+
+    一、description 这次留下了，labor 那边是砍的。
+        labor 的 description 99.95% 是空的，留着就是一片空白；
+        transactions 的 description 一个空值都没有，而且不长 ——
+        2026-10-02 量过：最长 80 字符、平均 11.8 字符、超过 200 字符的 0 行。
+        ⇒ 它能进列表（"Stock initialization"、"ERP JTP GEAR" 这种，
+        一眼看出这单是干嘛的）。同一列名在两张表上的结论可以相反，
+        因为值本身差得远 —— 判据是列里的值，不是列的名字。
+
+    二、砍掉的三列，砍的理由跟"有没有值"没关系：
+        source_update_count  11 种值，"这条源记录被更新过几次"。
+                             它是 ETL 挑版本用的，排障时才看。
+                             详情页留了它（那儿就是排障的地方），列表不留。
+        source_created_at    这两列是"我们什么时候把它导进来的"，
+        source_updated_at    对看数据的人没意义（跟 TransactionDetail 里
+                             没带 created_at/updated_at 一个口径）。
+                             而且列表是"扫一眼找目标"的场景，不是排查场景。
+
+    没砍但要说明的：
+
+        work_order_id  33.04% 是空的（248712 行）。这个空是正常的，不是数据缺了 ——
+                       物料移动本来就不一定挂工单（例行的收发料不属于任何维修单），
+                       而工时几乎总挂着（那是人填的，填的时候必须选单）。
+                       所以这一列为空要在界面上显示成空，不能当成"查不到"。
+        status         3 种值，98.39% 是 'A'。区分度很差，但它是"这单作废没"
+                       的唯一来源，列表上留着（前端显示成徽标），
+                       只是不做成过滤条件 —— 理由见 service。
+
+    from_entity / from_code / to_entity / to_code 这四列一起看，说的是同一件事：
+    这批料从哪到哪。from_code 单独看没意义（'M-TS' 不知道是什么），
+    得配 from_entity 才知道它是个存放点还是个公司。所以要么四列都发，要么都不发。
+    """
+
+    id: int
+    source_record_id: str
+    data_source: str
+    # 33.04% 是空的，理由见类注释
+    work_order_id: int | None
+    # 保留原始 BOO_EVENT，外键解析之前先留一手
+    source_work_order_record_id: str | None
+    # 0% 空、最长 80 字符，所以列表带得动（labor 那边同名列 99.95% 空，砍了）
+    description: str | None
+    # 6 种值（RECV / STTK / I ...）。码什么意思文档没给，不翻译，原样发
+    transaction_type: str | None
+    transaction_date: date | None
+    # 3 种值，98.39% 是 'A'。列表显示，不做过滤
+    status: str | None
+    # 这四列是一组：从哪来、到哪去。理由见类注释
+    from_entity: str | None
+    from_code: str | None
+    to_entity: str | None
+    to_code: str | None
+
+
 class TransactionDetail(BaseModel):
     """交易详情：头 + 一页明细 + 明细的翻页说明。
 

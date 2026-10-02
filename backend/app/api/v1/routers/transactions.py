@@ -6,11 +6,41 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db, require_permissions
 from app.core.permissions import PermissionCode
 from app.models import User
-from app.schemas.common import ApiResponse
-from app.schemas.transactions import TransactionDetail
+from app.schemas.common import ApiResponse, CursorResponse
+from app.schemas.transactions import TransactionDetail, TransactionSummary
 from app.services.transactions import TransactionService
 
 router = APIRouter()
+
+
+@router.get("", response_model=ApiResponse[CursorResponse[TransactionSummary]])
+def list_transactions(
+    db: Annotated[Session, Depends(get_db)],
+    # 权限闸门。名字前面加下划线是因为这个参数我们自己不用，
+    # 纯粹为了让那个依赖跑起来 —— 它跑到了，权限就是查过了
+    #
+    # 用的是 transaction:read。库里四个角色都有（跟业务规则那张表一致：
+    # Transactions 那一列全是"读"，连 ADMIN 也只有读 —— 物料交易是历史数据，
+    # 平台不允许改，所以没有 transaction:create / update 这种权限点）
+    _: Annotated[
+        User, Depends(require_permissions(PermissionCode.TRANSACTION_READ))
+    ],
+    # 游标翻页，跟 assets / work-orders / labor 三个列表完全一致：
+    # 拿上一页 meta.next_cursor 当这次的 after_id 传回来，不传就是第一页。
+    # 没有 page / page_size —— 75 万行的表上 OFFSET 翻页实测 0.92 秒一次，
+    # 具体数字写在 repositories/transactions.py 的注释里
+    after_id: int | None = Query(None, ge=1),
+    # ge / le 是取值范围，越界 FastAPI 直接甩 422，函数体里不用再写 if
+    limit: int = Query(20, ge=1, le=100),
+    # 唯一的过滤条件：只看某张工单动过的料。
+    # 为什么就它一个，另外 8 个文档点名过的参数为什么没做，
+    # 三个不同的理由写在 services/transactions.py 里
+    work_order_id: int | None = Query(None, ge=1),
+) -> ApiResponse[CursorResponse[TransactionSummary]]:
+    items, meta = TransactionService(db).list_transactions(
+        after_id=after_id, limit=limit, work_order_id=work_order_id
+    )
+    return ApiResponse(data=CursorResponse(items=items, meta=meta))
 
 
 @router.get("/{transaction_id}", response_model=ApiResponse[TransactionDetail])

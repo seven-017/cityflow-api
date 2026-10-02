@@ -7,6 +7,9 @@ from app.models import Transaction, TransactionDetail
 # 单独拎出来放个常量，至少改名时能一眼搜到有几处引用。
 DETAIL_TRANSACTION_INDEX = "ix_transaction_details_transaction_id"
 
+# 交易头表上按工单过滤用的索引名。道理同上：写死的索引名要有个地方能搜。
+WORK_ORDER_INDEX = "ix_transactions_work_order_id"
+
 
 class TransactionRepository:
     """物料交易两张表的查询：头（transactions）和明细（transaction_details）。
@@ -32,6 +35,84 @@ class TransactionRepository:
         """
         statement = select(Transaction).where(Transaction.id == transaction_id)
         return self.db.execute(statement).scalar_one_or_none()
+
+    def list_transactions(
+        self,
+        *,
+        after_id: int | None,
+        limit: int,
+        work_order_id: int | None = None,
+    ) -> list[Transaction]:
+        """按 id 往后翻，一次取 limit 条（其实会多要一条，见下面）。
+
+        这是本仓库第四个列表查询（assets / work_orders / labor / 这个），
+        分页的骨头跟它们一样：游标不用 OFFSET，多要一条探路。
+        但每次都得重新量一遍，因为表不一样、坑不一样。2026-10-02 实测
+        （各跑 5 次取中位数，75 万行）：
+
+            WHERE id > 0          ORDER BY id LIMIT 21  ->     0.45 ms
+            WHERE id > 410000     ORDER BY id LIMIT 21  ->     0.47 ms
+            对照 LIMIT 21 OFFSET 0                      ->     0.46 ms
+            对照 LIMIT 21 OFFSET 700000                 ->   919.69 ms
+
+        最后一组是对照：同样 21 行，OFFSET 要 0.92 秒。
+        EXPLAIN 里 OFFSET 那条 type=index、rows=700021 —— 它真的是"从头一行行走，
+        走过 70 万行全丢掉再取 21 行"。游标那条 0.47 ms。
+        ⇒ 919.69 / 0.47 差不多 1966 倍。
+        （assets 上量到 3700 倍、labor 上 7300 倍、这儿 1966 倍 ——
+        差这么多不是表小，是因为这三张表的主键密度和行宽不一样，
+        OFFSET 的代价本来就跟"要走多少行"绑定。数字不一样不代表哪个是错的。）
+
+        一句题外话：OFFSET 那条 rows 写着 700021，看着像"扫了 70 万行所以慢"，
+        对，它就是真的扫了。但反过来看前面那些游标条的 rows 也写着 373078、
+        却只要 0.45 ms —— 因为 LIMIT 21 到了就停。所以 rows 是估算，别拿它当耗时看。
+
+        ---------------------------------------------------------------
+        按工单过滤的 FORCE INDEX（跟明细那个坑是同一个坑，但结论要重写）：
+
+        不传 work_order_id 就是全表翻页，走 PRIMARY，没什么可说的。
+        传了 work_order_id 就得走另一个索引，这儿出了跟明细一样的岔子 ——
+        只要语句里带上 `id > 0`（也就是翻到第二页之后），优化器就走 index_merge：
+
+            A 带 id>0（不加 FORCE）   1.62 ms  type=index_merge  Using intersect(...)
+            B 带 id>0 + FORCE         0.44 ms  type=range        Using index condition
+
+        ⇒ 快 3.7 倍。原理跟明细那次一模一样（`id > 0` 筛不掉任何一行，
+        但优化器为了用它放弃了本来就用得上的索引），不再重复。
+
+        但有一处跟明细不一样，值得单独记，因为它反直觉：
+
+            C 不带 id>0（第一页真实形状）  0.60 ms  type=ref    <- 本来就快
+            D 不带 id>0 + FORCE            0.53 ms  type=ref
+
+        第一页根本不需要 FORCE —— 0.60 ms 已经够好。坑只在翻页时出现。
+        那为什么不写成"只在带 after_id 时才 FORCE"？两个理由：
+
+          1. 一个仓库方法里出现两种执行计划，读代码的人得先想"这次走的哪种"。
+             而 FORCE 之后第一页也没变慢（0.60 -> 0.53，还在噪声范围内），
+             那就统一 FORCE，少一个分支。
+          2. 第一页快是因为它碰巧不带 id>0。可"碰巧"这种东西，
+             SQLAlchemy 生成条件时一个 `if` 的写法变化就没了。
+             与其赌它，不如定死。
+
+        代价跟明细那次一样：索引名写死在 SQL 里，谁把这索引改名或删了，
+        这条查询报 MySQL 1176 当场炸，不会静默走回慢 3.7 倍的计划。
+        用 WORK_ORDER_INDEX 常量引着，改名时搜得到。
+        """
+        statement = select(Transaction)
+        if work_order_id is not None:
+            # 不传就是"全部交易"，不加工单条件
+            statement = statement.with_hint(
+                Transaction,
+                f"FORCE INDEX ({WORK_ORDER_INDEX})",
+                "mysql",
+            ).where(Transaction.work_order_id == work_order_id)
+        if after_id is not None:
+            # 不传 after_id 就是第一页
+            statement = statement.where(Transaction.id > after_id)
+        # 多要一条探路，多出来的那条由 service 裁掉，不会发到前端
+        statement = statement.order_by(Transaction.id).limit(limit + 1)
+        return list(self.db.execute(statement).scalars().all())
 
     def list_details(
         self,

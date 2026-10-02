@@ -27,7 +27,7 @@ api_router.include_router(
 api_router.include_router(labor.router, prefix="/labor", tags=["labor"])
 # transactions 是物料交易（领了什么料、从哪个库到哪个库）。
 # 跟 labor 不一样的是它有两层：交易头 + 逐行物料明细，所以前缀用复数。
-# 这一版只挂了详情（GET /transactions/{id}），列表接口还没做
+# 现在挂了两个：GET /transactions（列表）和 GET /transactions/{id}（详情）
 api_router.include_router(
     transactions.router, prefix="/transactions", tags=["transactions"]
 )

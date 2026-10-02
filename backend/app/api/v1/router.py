@@ -1,6 +1,14 @@
 from fastapi import APIRouter
 
-from app.api.v1.routers import assets, auth, health, labor, system, work_orders
+from app.api.v1.routers import (
+    assets,
+    auth,
+    health,
+    labor,
+    system,
+    transactions,
+    work_orders,
+)
 
 # 所有 v1 接口的总入口，新增一个模块就在这儿挂一行
 api_router = APIRouter()
@@ -17,3 +25,9 @@ api_router.include_router(
 # 这条线是从 AMPS 原始数据映射过来的，跟 assets 一样只有读接口 ——
 # 平台自己记工时的写接口（labor:create 那个权限点）还没做
 api_router.include_router(labor.router, prefix="/labor", tags=["labor"])
+# transactions 是物料交易（领了什么料、从哪个库到哪个库）。
+# 跟 labor 不一样的是它有两层：交易头 + 逐行物料明细，所以前缀用复数。
+# 这一版只挂了详情（GET /transactions/{id}），列表接口还没做
+api_router.include_router(
+    transactions.router, prefix="/transactions", tags=["transactions"]
+)

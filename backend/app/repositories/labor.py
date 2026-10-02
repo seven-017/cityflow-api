@@ -76,3 +76,15 @@ class LaborRepository:
         # 多出来的那一条由 service 裁掉，不会发到前端。
         statement = statement.order_by(WorkOrderLabor.id).limit(limit + 1)
         return list(self.db.execute(statement).scalars().all())
+
+    def add(self, labor: WorkOrderLabor) -> WorkOrderLabor:
+        """插一条工时。
+
+        只 add 不 commit，提交时机交给 service ——
+        因为创建工时是"业务记录 + 操作日志"两件事一起落库，
+        必须一起成功或者一起失败。要是在这儿自己提交了，
+        后面写日志时万一抛异常，就会留下一条"凭空出现、查不到谁录的"工时。
+        （跟 operation_logs / work_orders 两边的 add 一个规矩。）
+        """
+        self.db.add(labor)
+        return labor

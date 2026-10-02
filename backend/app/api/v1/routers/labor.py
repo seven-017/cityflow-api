@@ -1,16 +1,54 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_permissions
 from app.core.permissions import PermissionCode
 from app.models import User
 from app.schemas.common import ApiResponse, CursorResponse
-from app.schemas.labor import LaborSummary
+from app.schemas.labor import LaborCreateRequest, LaborSummary
 from app.services.labor import LaborService
 
 router = APIRouter()
+
+
+@router.post(
+    "",
+    response_model=ApiResponse[LaborSummary],
+    # 创建资源返 201 而不是默认的 200，跟创建工单一个口径 ——
+    # 前端看状态码就能分清"新建了一条"和"查到了点什么"，不用解析返回体
+    status_code=status.HTTP_201_CREATED,
+)
+def create_labor(
+    payload: LaborCreateRequest,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+    # 这个依赖前面不加下划线，因为录工时确实要用到"是谁录的" ——
+    # 它要写进操作日志，而且日志里那一列是审计"这条工时谁填的"的唯一依据
+    #
+    # 权限点是 labor:create，跟列表用的 labor:read 是分开的两个。
+    # 库里 labor:create 只给了 ADMIN 和 ENGINEER（DISPATCHER / VIEWER 没有），
+    # 跟业务规则那张 RBAC 表一致：Labor 那一列 ADMIN 是"读写"、ENGINEER 是"创建/读"、
+    # 另外两个只有"读"。用 DISPATCHER 去调会被权限层挡在 403
+    operator: Annotated[
+        User, Depends(require_permissions(PermissionCode.LABOR_CREATE))
+    ],
+) -> ApiResponse[LaborSummary]:
+    # 返回的形状就是列表里那一行的形状（LaborSummary）。
+    # 不是偷懒 —— 一条工时就是一行，它没有"详情"这种东西：
+    # 工单有流水和备注两张子表所以详情比列表宽，labor 没有子表，
+    # 列表那 12 个字段就是它的全部。为它再造一个同名的 schema 只会让字段定义有两处
+    #
+    # ip 取不到就传 None，操作日志那一列本来就可空，不用为它编个假地址
+    ip_address = request.client.host if request.client else None
+    created = LaborService(db).create_labor(
+        payload=payload,
+        operator=operator,
+        request_path=request.url.path,
+        ip_address=ip_address,
+    )
+    return ApiResponse(data=created)
 
 
 @router.get("", response_model=ApiResponse[CursorResponse[LaborSummary]])
@@ -22,7 +60,7 @@ def list_labor(
     # 用的是 labor:read，跟 asset:read / work_order:read 是两个独立的权限点。
     # 库里 labor:read 四个角色都有（ADMIN / DISPATCHER / ENGINEER / VIEWER），
     # 跟业务规则那张表一致：四个角色对 Labor 都是"读"，只有 ADMIN 和 ENGINEER 能写。
-    # 那个"写"是 labor:create，这个文件里没有接口用它 —— 平台自己记工时的接口还没做。
+    # 那个"写"就是本文件上面那个 POST，用的是 labor:create
     _: Annotated[
         User, Depends(require_permissions(PermissionCode.LABOR_READ))
     ],

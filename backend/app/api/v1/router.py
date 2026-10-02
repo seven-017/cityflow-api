@@ -22,8 +22,8 @@ api_router.include_router(
     work_orders.router, prefix="/work-orders", tags=["work-orders"]
 )
 # labor 是工时（谁来干了多长时间、多少钱）。文档里路径就是 /labor，没有横线。
-# 这条线是从 AMPS 原始数据映射过来的，跟 assets 一样只有读接口 ——
-# 平台自己记工时的写接口（labor:create 那个权限点）还没做
+# 现在是读 + 写两个接口：GET /labor（列表）、POST /labor（录一条工时）。
+# 写接口那个权限点 labor:create 跟读是分开的，库里只有 ADMIN 和 ENGINEER 有
 api_router.include_router(labor.router, prefix="/labor", tags=["labor"])
 # transactions 是物料交易（领了什么料、从哪个库到哪个库）。
 # 跟 labor 不一样的是它有两层：交易头 + 逐行物料明细，所以前缀用复数。

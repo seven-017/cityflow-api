@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class LaborSummary(BaseModel):
@@ -93,3 +93,68 @@ class LaborSummary(BaseModel):
     hours: Decimal | None
     rate: Decimal | None
     cost: Decimal | None
+
+
+class LaborCreateRequest(BaseModel):
+    """平台自己录一条工时。
+
+    七个字段，只有三个必填。这份取舍一条条说：
+
+    必填的三个，缺了这条工时就不成立：
+
+        work_order_id   挂在哪张单上。
+                        表上这一列其实可以为空（导入数据里 0.41% 是空的 ——
+                        那是 AMPS 原始数据本身就挂不上单）。但我们自己录的
+                        要求必填：一条不挂单的工时进不了任何工单的汇总、
+                        不进 SLA、不进 Dashboard 的工时趋势，等于一条谁都看不见的
+                        孤儿数据。平台主动造孤儿数据没意义，所以不开放这个可能。
+                        这个判据跟"表可不可空"是两回事，别混。
+
+        hours           多少小时。这是这个实体存在的理由。
+
+        rate            时薪。为什么让录单的人自己填、而不是系统带出来 ——
+                        因为库里没有"工种 -> 时薪"这张映射表（AMPS 没给）。
+                        将来真要补那张表就该从那儿查，但那是这一步之后的事。
+
+    可选的四个：
+
+        work_date       不填就是今天。允许填过去的日期 —— 补录昨天干的活是常事。
+        trade           工种，97 种值。
+        operation_type  作业类型，只有 2 种值。
+        action          动作码，19 种值，其中 99.3% 就两种（'10' / '20'）。
+
+    没有的字段，以及为什么没有：
+
+        cost            服务端算，不收。库里 cost = hours x rate 这条关系
+                        实测 20 万行 100% 成立（容差算上了 hours 被截到两位小数的
+                        那部分）。让调用方自己传 cost 就等于放开了"三个数互相对不上"
+                        的可能 —— 而那条关系正是列表接口拿来做断言的依据。
+                        所以只收两个数，第三个由服务端乘出来，保证内部一致。
+
+        description     表上有这一列，但 labor 既没有详情接口、列表也不带它
+                        （它在导入数据里 99.95% 是空的，列表那一步按这个砍了）。
+                        填了没地方看，所以不开放 —— 让用户以为"我记了备注"、
+                        结果哪儿都显示不出来，比一开始就不收更糟。
+
+        source_record_id / data_source / entered_at
+                        这三个是服务端填的，不是调用方能挑的：编号得保证不重复
+                        （所以服务端生成）、数据源必须是 SYNTHETIC_PLATFORM
+                        （写成 REAL_PUBLIC 这条记录就永远没人能改了）、
+                        录入时刻只有一个正确答案（现在）。
+    """
+
+    work_order_id: int = Field(ge=1)
+    # 上限跟列定义对齐：hours 是 Numeric(12,2)、rate 是 Numeric(18,4)。
+    # 不限制小数位的话，传个 hours=6.005 会被 MySQL 静默截成 6.01 ——
+    # 存进去的数跟用户填的不是一个数，而且没有任何提示。
+    # 在这儿挡住变成 422，比事后去库里找"这数怎么不对"强。
+    hours: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    # 允许 0（志愿工时也是工时），但不允许负。库里那些负数（73861 行）
+    # 是导入数据的原样，平台自己录的不开放负数。
+    rate: Decimal = Field(ge=0, max_digits=18, decimal_places=4)
+    work_date: date | None = None
+    # 三个字符串字段都照列宽卡上限。不卡的话超长会撞 MySQL 的
+    # Data too long（Error 1406）变成 500，本来是个 422 的事
+    trade: str | None = Field(None, max_length=150)
+    operation_type: str | None = Field(None, max_length=100)
+    action: str | None = Field(None, max_length=255)

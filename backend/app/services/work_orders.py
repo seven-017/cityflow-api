@@ -3,6 +3,7 @@ from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
+from app.core.data_sources import DataSource
 from app.core.exceptions import (
     BusinessException,
     ConcurrentUpdateException,
@@ -135,12 +136,10 @@ def work_order_detail(
     )
 
 
-# 双数据源的两面旗子。官方导进来的那批是 REAL_PUBLIC（只读，谁都不许改），
-# 平台自己录的走 SYNTHETIC_PLATFORM。
-# 每个写操作的第一道闸门都要拿这个值比，所以起两个名字放这儿，别到处写字符串 ——
-# 手写字符串敲错了不会报错，只会让闸门的结果跟你以为的不一样，那种错最难查。
-DATA_SOURCE_PUBLIC = "REAL_PUBLIC"
-DATA_SOURCE_PLATFORM = "SYNTHETIC_PLATFORM"
+# 双数据源那两个值原来就在这儿（DATA_SOURCE_PUBLIC / DATA_SOURCE_PLATFORM），
+# 2026-10-02 挪到 core/data_sources.py 去了。挪的理由不是因为这儿不好，
+# 是因为 labor 的写接口也要用同一对值，而 labor 不该反过来 import 工单这个模块。
+# 现在用 DataSource.SYNTHETIC_PLATFORM 这种写法，拼错会当场炸。
 
 
 # 平台自己录的工单用它自己的一套编号：PF- 后面跟 12 位十六进制。
@@ -268,7 +267,7 @@ class WorkOrderService:
             # 双数据源隔离的落点。官方导入的那些是 REAL_PUBLIC（只读，不许动），
             # 平台自己录的走 SYNTHETIC_PLATFORM。这一列决定了后面分派、流转、
             # 加处理记录时第一道闸门放不放行 —— 写错了后面全被挡
-            data_source=DATA_SOURCE_PLATFORM,
+            data_source=DataSource.SYNTHETIC_PLATFORM,
             description=payload.description,
             work_type=payload.work_type,
             asset_source_record_id=payload.asset_source_record_id,
@@ -356,7 +355,7 @@ class WorkOrderService:
         # 闸门一：数据源。官方导进来那批是只读的 ——
         # 这不是我们定的规矩，是业务文档写死的：那批数据代表"已经发生过的事"，
         # 谁改了就说不清了。只有平台自己录的单才允许流转
-        if work_order.data_source != DATA_SOURCE_PLATFORM:
+        if work_order.data_source != DataSource.SYNTHETIC_PLATFORM:
             raise PermissionDeniedException(
                 f"Work order {work_order_id} is imported public data, cannot be assigned."
             )
@@ -494,7 +493,7 @@ class WorkOrderService:
 
         # 闸门一：数据源。跟分派那边同一句话 —— 官方导进来的是只读的，
         # 它代表"已经发生过的事"，谁改了都说不清
-        if work_order.data_source != DATA_SOURCE_PLATFORM:
+        if work_order.data_source != DataSource.SYNTHETIC_PLATFORM:
             raise PermissionDeniedException(
                 f"Work order {work_order_id} is imported public data, "
                 f"cannot run {action.value}."
@@ -707,7 +706,7 @@ class WorkOrderService:
         if work_order is None:
             raise NotFoundException(f"Work order {work_order_id} not found.")
 
-        if work_order.data_source != DATA_SOURCE_PLATFORM:
+        if work_order.data_source != DataSource.SYNTHETIC_PLATFORM:
             raise PermissionDeniedException(
                 f"Work order {work_order_id} is imported public data, "
                 f"cannot add records."

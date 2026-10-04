@@ -1,7 +1,10 @@
+from typing import NamedTuple
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Transaction, TransactionDetail
+from app.repositories.sql_helpers import trend_window
 
 # 明细那张表上跟 transaction_id 有关的索引名。硬编码到 SQL 里的东西，
 # 单独拎出来放个常量，至少改名时能一眼搜到有几处引用。
@@ -9,6 +12,18 @@ DETAIL_TRANSACTION_INDEX = "ix_transaction_details_transaction_id"
 
 # 交易头表上按工单过滤用的索引名。道理同上：写死的索引名要有个地方能搜。
 WORK_ORDER_INDEX = "ix_transactions_work_order_id"
+
+
+class MonthlyTransactionCount(NamedTuple):
+    """交易趋势图的一个点：某个月 + 那个月有多少张交易单。
+
+    名字特意带上 Transaction，不跟工单那边那个 MonthlyWorkOrderCount 混。
+    两个类的字段名也不同（transaction_count / work_order_count），
+    service 里对着写的时候一眼知道在拼哪个图。
+    """
+
+    month: str
+    transaction_count: int
 
 
 class TransactionRepository:
@@ -62,6 +77,46 @@ class TransactionRepository:
         return int(
             self.db.execute(select(func.count(TransactionDetail.id))).scalar_one()
         )
+
+    def trend_by_month(self, months: int) -> list[MonthlyTransactionCount]:
+        """交易趋势：最近 months 个月，每月多少张交易单。
+
+        数的是头（transactions，75 万行），不是明细。这个选择是有意的：
+        明细那 229 万行按月分没什么意义 —— 一张单有几行明细，取决于那张单
+        领了几样东西，跟"那个月做了多少笔交易"不是一回事。
+        拿明细数当月度量，会得到一条"物品领得杂不杂"的曲线，不是"交易多不多"。
+
+        2026-10-04 实测（同一个 session 连着跑，热 buffer pool）：
+
+            限 12 个月   10.4 ms   type=range key=ix_transactions_transaction_date
+            限 24 个月   49 ms
+            限 36 个月   81 ms
+            全历史      737 ms     209 个月
+
+        这个是最便宜的趋势图，12 个月只要 10.4 ms —— 比工单趋势（48 ms）
+        还快四倍多，因为这张表本来就只有工单的三分之一大，而且
+        transaction_date 这一列是全库 NULL 占比 0.00% 的干净列。
+
+        提一句数字口径：上面这组是走 ORM 量的。同一件事上一轮用裸 SQL 量到的是
+        22 ms —— 执行计划一字不差（都是 type=range 走同一棵索引、Extra 也相同），
+        差的就是 buffer pool 当时热不热。「两次不同时机量的绝对值不能直接比」，
+        要比就比执行计划和比例（比如"12 个月比全历史快 70 倍"这种）。
+        这也是为什么注释里每组数都带着条件写 —— 条件不同，数就没有可比性。
+        """
+        month = func.date_format(Transaction.transaction_date, "%Y-%m").label("month")
+        statement = (
+            select(month, func.count(Transaction.id).label("transaction_count"))
+            .where(Transaction.transaction_date >= trend_window(months))
+            .group_by(month)
+            .order_by(month)
+        )
+        return [
+            MonthlyTransactionCount(
+                month=row.month,
+                transaction_count=row.transaction_count,
+            )
+            for row in self.db.execute(statement).all()
+        ]
 
     def list_transactions(
         self,

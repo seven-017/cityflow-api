@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import WorkOrderLabor
+from app.repositories.sql_helpers import trend_window
 
 
 class LaborTotals(NamedTuple):
@@ -15,6 +16,25 @@ class LaborTotals(NamedTuple):
     但"合计小时"和"合计金额"这两兄弟长得太像了，光是拆包位置错一位就容易搞反。
     """
 
+    record_count: int
+    total_hours: Decimal | None
+    total_cost: Decimal | None
+
+
+class MonthlyLaborTotals(NamedTuple):
+    """Labor 趋势图的一个点：某个月 + 条数 + 合计小时 + 合计金额。
+
+    四个字段：一个 str、一个 int、两个可空 Decimal。后面三个全是数字，
+    而且两个合计又是那对容易搞反的兄弟，所以照样带名字。
+
+    两个合计允许是 NULL：某个月一条记录都没有的话它根本不会出现在结果里
+    （GROUP BY 的性质），但"这个月有一行、那行的 hours 是 NULL"是另一回事 ——
+    SUM 会跳过 NULL，所以只要组里有一行有值就不会是 NULL。真正 NULL 的情况是
+    整组都是 NULL。现在库里 hours / cost 两列一行 NULL 都没有，
+    但那是导入脚本的行为，不是数据库的约束。
+    """
+
+    month: str
     record_count: int
     total_hours: Decimal | None
     total_cost: Decimal | None
@@ -127,6 +147,79 @@ class LaborRepository:
             total_hours=total_hours,
             total_cost=total_cost,
         )
+
+    def trend_by_month(self, months: int) -> list[MonthlyLaborTotals]:
+        """Labor 趋势：最近 months 个月，每月的条数 / 合计小时 / 合计金额。
+
+        三个汇总一条 SQL 出，不分成三条 —— 跟 totals() 那边同一个道理，
+        这张表 320 万行，扫三遍拿三个数不如扫一遍拿三个数。
+
+        这里有个坑，量了才知道，而且它是九个图表里最贵的一格。
+
+        结论先摆出来：「只要 select 里带上 SUM(hours) / SUM(cost)，
+        work_date 那个索引就用不上了」，窗口限多小都一样。
+
+        2026-10-04 实测（同一个 session 里连着跑，buffer pool 是热的）：
+
+            只数条数，限 12 个月       94.2 ms   type=range key=ix_work_order_labor_work_date
+            带三个汇总，限 12 个月   3083.7 ms   type=ALL   rows=3159256
+            带三个汇总，限 24 个月   3195.1 ms   type=ALL   rows=3159256
+
+        盯住后两行：窗口从 12 翻到 24 个月，耗时只涨 3.6%，EXPLAIN 里 rows
+        一个数都没变 —— 都是 3159256，也就是整张表。这说明它压根没在"按窗口筛"，
+        每次都是把 320 万行从头到尾扫一遍，扫完再丢掉窗口外的。
+
+        为什么：限窗那个条件只用 work_date 一列，单独走索引没问题；但 select 里
+        还要 hours 和 cost，这两列不在索引里，走索引就得回表 39 万次。
+        优化器一算"回表 39 万次"比"顺序扫 320 万行"贵，就放弃索引了。
+        这是它的判断，不是 bug —— 对行宽不小的表，这个判断通常还是对的。
+
+        那为什么明知道 3 秒还这么写，三条理由：
+
+        1. 图上真正要看的是"每月花了多少工时 / 多少钱"，只看条数没意义。
+           一个"每月录了多少条"的图，看不出这个月是活多还是活重。
+        2. 三个数必须出自同一次扫描。拆成三条 SQL 就是三次全表扫，只会更贵。
+        3. 这整页是缓存的，5 分钟才算一次。3 秒摊进 5 分钟里不算什么 ——
+           缓存存在的意义就是让这种"偶尔贵一次、然后一直便宜"的东西不难受。
+
+        根治的办法是建 (work_date, hours, cost) 这种覆盖索引：
+        三个值都在索引里，不用回表，优化器就愿意走它了。
+        但加索引是另一件事 —— 多一个索引就多一份写入代价，得先量清楚值不值当。
+        这一版先把这个数记在这儿，将来真要优化，从这一行起步。
+        （跟上面 list_labor 里那个"要根治得建 (work_order_id, id)"是同一类决定：
+        都是"知道怎么治，但现在不治"，两处都留了数，不是忘了。）
+
+        最后一件必须记下来的数据，因为图上会出现一根突兀的高柱：
+        2026-08 那个月的合计是 1961495.60 小时，比平常的 3 万多个 60 倍。
+        原因查过了，是单条脏数据 —— id=3175170 那一行 hours=1929817
+        （换算下来约 220 年）、cost=52761196.78，它一条就把整月从 3 万拉到 196 万。
+
+        不清洗、不过滤，照原样发出去。它是库里真真切切存在的行，不是查询算错了，
+        也不是聚合写歪了。前端要是嫌那根柱子难看可以自己处理（截断纵轴之类），
+        但后端不替它决定"哪个数不算数" —— 真实数据里的异常值该被看见，
+        抹掉它只是在骗下一个看图的人。
+        """
+        month = func.date_format(WorkOrderLabor.work_date, "%Y-%m").label("month")
+        statement = (
+            select(
+                month,
+                func.count(WorkOrderLabor.id).label("record_count"),
+                func.sum(WorkOrderLabor.hours).label("total_hours"),
+                func.sum(WorkOrderLabor.cost).label("total_cost"),
+            )
+            .where(WorkOrderLabor.work_date >= trend_window(months))
+            .group_by(month)
+            .order_by(month)
+        )
+        return [
+            MonthlyLaborTotals(
+                month=row.month,
+                record_count=row.record_count,
+                total_hours=row.total_hours,
+                total_cost=row.total_cost,
+            )
+            for row in self.db.execute(statement).all()
+        ]
 
     def add(self, labor: WorkOrderLabor) -> WorkOrderLabor:
         """插一条工时。

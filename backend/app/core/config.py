@@ -49,6 +49,30 @@ class Settings(BaseSettings):
     # 也是文档定的（"最多 2 个并发聚合，降低本地 MySQL I/O 争用"）。
     # 它挡的是"缓存刚过期、十个请求一起涌进来"的那种瞬间
     dashboard_max_concurrent_aggregations: int = 2
+    # Dashboard 上三个趋势图 + 平均处理周期，只看最近这么多个月。
+    #
+    # 为什么是 12，三条理由，最硬的是第二条：
+    #
+    # 1. 业务规则文档里"平均处理时长"写的就是"最近 12 个月"，不是全历史。
+    #    趋势图跟着一起用同一个窗口，省得页面上两个地方口径不一样。
+    #
+    # 2. 性能上正好卡在这条线上。2026-10-04 实测，同一个平均周期的聚合、
+    #    只换时间窗（这三行是同一台机器同一天量的）：
+    #
+    #        全历史         50.72 天   3125 ms   type=ALL
+    #        最近 12 个月   22.04 天    147 ms   type=range  走 ix_work_orders_request_date
+    #        最近 24 个月   24.80 天   2935 ms   type=ALL    <- 又掉回全表扫
+    #
+    #    注意 24 个月那行：它比 12 个月慢了 20 倍，不是因为多扫一倍数据，
+    #    是优化器一看窗口这么大就不认为索引划算了、直接全表扫。
+    #    也就是说 12 往上加一格，性能不是缓降而是塌方。
+    #
+    # 3. 全历史是 223 个月。223 个点画在图上就是一根挤在一起的毛刺，
+    #    看不出任何东西。12 个点才是能读的。
+    #
+    # 这个值和它下面那句 SQL 片段的关系，写在 repositories/work_orders.py 的
+    # trend_window() 里 —— 那儿说的是"为什么它能安全地当绑定参数用"。
+    dashboard_trend_window_months: int = 12
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_ROOT / ".env",

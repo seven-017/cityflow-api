@@ -42,7 +42,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
 
     # Dashboard 聚合结果的缓存能活多久（秒）。5 分钟是架构文档定的值，
-    # 不是拍脑袋：实测一次 overview 要 5531 ms，而这一页看的是量级和趋势，
+    # 不是拍脑袋：一次 overview 要跑 15 条 SQL 去扫大表，冷态十几秒到二十秒
+    # （2026-10-05 两次实测 13847 / 19606 ms —— 差这么多是 buffer pool 热不热，
+    # 这类耗时只报一次数会误导人），而这一页看的是量级和趋势，
     # 5 分钟前的数字完全够用。改小只会让 MySQL 白挨更多次全表扫
     dashboard_cache_ttl_seconds: int = 300
     # 同一时刻最多几个聚合任务在真跑，剩下的排队。

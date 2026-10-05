@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class UserSummary(BaseModel):
-    # 注意这里**没有** password_hash。schema 就是白名单，
+    # 注意这里没有 password_hash。schema 就是白名单，
     # 没写上去的字段一个都出不去
     id: int
     username: str

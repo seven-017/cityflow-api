@@ -7,7 +7,7 @@ from pwdlib import PasswordHash
 from app.core.config import get_settings
 from app.core.exceptions import UnauthorizedException
 
-# 推荐算法自动选（当前是 Argon2id）。密码**永远不存明文**，只存这个哈希串
+# 推荐算法自动选（当前是 Argon2id）。密码永远不存明文，只存这个哈希串
 password_hasher = PasswordHash.recommended()
 
 

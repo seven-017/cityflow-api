@@ -103,7 +103,7 @@
 }
 ```
 
-返 201。建的工单带自己的编号（`PF-` 加 12 位十六进制）和数据源 `SYNTHETIC_PLATFORM`，`priority` 限定 `P1`~`P4`，建单那一刻按优先级算出 `sla_deadline`。
+返 201。建的工单带自己的编号（`PF-` 加 12 位十六进制）和数据源 `SYNTHETIC_PLATFORM`，`priority` 限定 `P1`\~`P4`，建单那一刻按优先级算出 `sla_deadline`。
 
 ### `GET /work-orders/{id}`
 

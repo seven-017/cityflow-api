@@ -28,3 +28,22 @@ export interface CursorResponse<T> {
   items: T[]
   meta: CursorMeta
 }
+
+/**
+ * 页码分页的说明书。跟游标那套正相反 —— 它真给总数。
+ *
+ * 项目里两套并存不是历史遗留：工单和资产那种百万级大表走游标，
+ * 因为算一次总数要几百毫秒；用户这种一共四行的表走页码，
+ * 算总数不心疼，而且「第 1 页 / 共 1 页」对看的人更直观
+ */
+export interface PageMeta {
+  page: number
+  page_size: number
+  total: number
+  pages: number
+}
+
+export interface PageResponse<T> {
+  items: T[]
+  meta: PageMeta
+}

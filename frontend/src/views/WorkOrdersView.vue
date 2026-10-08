@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 
 import { ApiError } from '@/api/http'
@@ -9,6 +10,8 @@ import {
   WORK_ORDER_STATUS_TAGS,
   type WorkOrderSummary,
 } from '@/types/workOrder'
+
+const router = useRouter()
 
 const PAGE_SIZE = 20
 
@@ -46,6 +49,11 @@ async function loadMore() {
 }
 
 onMounted(loadMore)
+
+// 整行可点，点哪儿都进详情，不用非得瞄准 ID 那一格
+function openDetail(row: WorkOrderSummary) {
+  router.push({ name: 'work-order-detail', params: { id: row.id } })
+}
 </script>
 
 <template>
@@ -59,7 +67,13 @@ onMounted(loadMore)
       </div>
     </template>
 
-    <el-table v-loading="!initialized" :data="items" stripe>
+    <el-table
+      v-loading="!initialized"
+      :data="items"
+      stripe
+      class="rows"
+      @row-click="openDetail"
+    >
       <el-table-column prop="id" label="ID" width="90" />
 
       <el-table-column prop="source_record_id" label="来源编号" width="130" show-overflow-tooltip />
@@ -111,6 +125,11 @@ onMounted(loadMore)
 .footer {
   margin-top: 16px;
   text-align: center;
+}
+
+/* 光标得跟着变成手型，不然光看是看不出来这行能点的 */
+.rows :deep(.el-table__row) {
+  cursor: pointer;
 }
 
 .end {

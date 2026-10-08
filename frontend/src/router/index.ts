@@ -33,6 +33,14 @@ const router = createRouter({
           name: 'work-orders',
           component: () => import('@/views/WorkOrdersView.vue'),
         },
+        {
+          // :id 是路径参数，列表里点一行就跳到这儿。
+          // 注意这条要写在 work-orders 后面 —— 路由是按顺序匹配的，
+          // 反过来的话 /work-orders 会先去撞 work-orders/:id，把 id 当成空
+          path: 'work-orders/:id',
+          name: 'work-order-detail',
+          component: () => import('@/views/WorkOrderDetailView.vue'),
+        },
       ],
     },
     // 地址输错不要给一片空白，送回首页

@@ -1,0 +1,26 @@
+{
+  "name": "cityflow-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "element-plus": "^2.11.3",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.21",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.7",
+    "vue-tsc": "^3.0.8"
+  }
+}

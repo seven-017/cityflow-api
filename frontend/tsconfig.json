@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    // vite/client 给的是 import.meta.env 这类东西的类型；
+    // node 是给 vite.config.ts 用的（它跑在 Node 里，不是浏览器里）。
+    // 正经项目会拆成两个 tsconfig 把两者隔开，
+    // 这儿就一个配置文件，能跑就行，别为它多养两个文件
+    "types": ["vite/client", "node"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue", "vite.config.ts"]
+}

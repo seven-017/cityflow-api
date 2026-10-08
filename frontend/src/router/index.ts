@@ -28,6 +28,11 @@ const router = createRouter({
           name: 'home',
           component: () => import('@/views/HomeView.vue'),
         },
+        {
+          path: 'work-orders',
+          name: 'work-orders',
+          component: () => import('@/views/WorkOrdersView.vue'),
+        },
       ],
     },
     // 地址输错不要给一片空白，送回首页

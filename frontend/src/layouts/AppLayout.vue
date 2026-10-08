@@ -18,6 +18,8 @@ interface MenuItem {
 
 const menus: MenuItem[] = [
   { path: '/', label: '首页' },
+  // 四个角色都有 dashboard:read，所以这一项谁登录都看得见
+  { path: '/dashboard', label: '数据看板', permission: PERMISSIONS.DASHBOARD_READ },
   { path: '/work-orders', label: '工单', permission: PERMISSIONS.WORK_ORDER_READ },
 ]
 

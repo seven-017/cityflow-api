@@ -30,4 +30,23 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // 把几个又大又不常改的库单独拆出去。
+        // 拆开之后，以后改业务代码时它们的文件指纹不变，浏览器缓存不会失效 ——
+        // 不然用户得为了几个字的改动重下一兆多。
+        //
+        // 说清楚：这只是拆开，总量一点没少。真要变小得让 Element Plus 按需引入
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined
+          if (id.includes('element-plus')) return 'vendor-element'
+          // echarts 底下是 zrender 在干活，两个得搁一块 ——
+          // 拆成两个文件的话它们会互相引用，反而多一次往返
+          if (id.includes('echarts') || id.includes('zrender')) return 'vendor-echarts'
+          return 'vendor'
+        },
+      },
+    },
+  },
 })
